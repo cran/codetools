@@ -67,7 +67,7 @@ showTreeLeaf <- function(e, w) {
 
 ##
 ## Call with current continuation
-## 
+##
 
 if (! exists("callCC"))
 callCC <- function(fun) {
@@ -87,7 +87,7 @@ makeConstantFolder <- function(...,
                                call = function(e, w) exitFolder(e, w),
                                exit = function(e, w)
                                   stop0(paste("not a foldable expression:",
-                                        deparse(e, width = 500))),
+                                        deparse(e, width.cutoff = 500))),
                                isLocal = function(v, w) FALSE,
                                foldable = isFoldable,
                                isConstant = isConstantValue,
@@ -127,7 +127,7 @@ constNames <- c("pi", "T", "F")
 
 foldLeaf <- function(e, w) {
     if (is.name(e) && as.character(e) %in% constNames && ! w$isLocal(e, w))
-        e <- get(as.character(e), env = .BaseEnv)
+        e <- get(as.character(e), envir = .BaseEnv)
     if (! w$isConstant(e)) exitFolder(e, w)
     e
 }
@@ -225,15 +225,15 @@ findLocalsList <- function(elist, envir = .BaseEnv) {
     specialSyntaxFuns <- c("~", "<-", "=", "for", "function")
     sf <- unique(c(locals, localStopFuns))
     nsf <- length(sf)
-    collect <- function(v, e, w) assign(v, TRUE, env = env)
+    collect <- function(v, e, w) assign(v, TRUE, envir = env)
     isLocal <- function(v, w) as.character(v) %in% sf
     w <- makeLocalsCollector(collect = collect, isLocal = isLocal)
     repeat {
         env <- mkHash()
         for (e in elist) walkCode(e, w)
-        isloc <- sapply(sf, exists, env = env, inherits = FALSE)
+        isloc <- sapply(sf, exists, envir = env, inherits = FALSE)
         if (nsf == length(locals) || length(sf[isloc] == nsf)) {
-            vals <- ls(env, all = TRUE)
+            vals <- ls(env, all.names = TRUE)
             rdsf <- vals %in% specialSyntaxFuns
             if (any(rdsf))
                 warning0(paste("local assignments to syntactic functions:",
@@ -251,7 +251,7 @@ findLocals <- function(e, envir = .BaseEnv)
     findLocalsList(list(e), envir)
 findOwnerEnv <- function(v, env, stop = NA, default = NA) {
     while (! identical(env, stop))
-        if (exists(v, env = env, inherits = FALSE))
+        if (exists(v, envir = env, inherits = FALSE))
             return(env)
         else if (is.emptyenv(env))
             return(default)
@@ -431,30 +431,30 @@ collectUsageHandlers <- mkHash()
 
 # 'where' is ignored for now
 addCollectUsageHandler <- function(v, where, fun)
-    assign(v, fun, env = collectUsageHandlers)
+    assign(v, fun, envir = collectUsageHandlers)
 
 getCollectUsageHandler <- function(v, w)
-    if (exists(v, env = collectUsageHandlers, inherits = FALSE) &&
+    if (exists(v, envir = collectUsageHandlers, inherits = FALSE) &&
         (isBaseVar(v, w$env) ||
          isStatsVar(v, w$env) || isUtilsVar(v, w$env)) )  # **** for now
-        get(v, env = collectUsageHandlers)
+        get(v, envir = collectUsageHandlers)
 ##**** this is (yet another) temporary hack
 isStatsVar <- function(v, env) {
     e <- findOwnerEnv(v, env)
-    if (exists(v, env = e, inherits = FALSE, mode = "function")) {
-        f <- get(v, env = e, inherits = FALSE, mode = "function")
+    if (exists(v, envir = e, inherits = FALSE, mode = "function")) {
+        f <- get(v, envir = e, inherits = FALSE, mode = "function")
         identical(environment(f), getNamespace("stats"))
     }
     else FALSE
-}            
+}
 isUtilsVar <- function(v, env) {
     e <- findOwnerEnv(v, env)
-    if (exists(v, env = e, inherits = FALSE, mode = "function")) {
-        f <- get(v, env = e, inherits = FALSE, mode = "function")
+    if (exists(v, envir = e, inherits = FALSE, mode = "function")) {
+        f <- get(v, envir = e, inherits = FALSE, mode = "function")
         identical(environment(f), getNamespace("utils"))
     }
     else FALSE
-}            
+}
 
 isSimpleFunDef <- function(e, w)
     typeof(e[[2]]) != "language" && typeof(e[[3]]) == "language" &&
@@ -679,8 +679,8 @@ findGlobals <- function(fun, merge = TRUE) {
             assign(v, TRUE, funs)
         else assign(v, TRUE, vars)
     collectUsage(fun, enterGlobal = enter)
-    fnames <- ls(funs, all = TRUE)
-    vnames <- ls(vars, all = TRUE)
+    fnames <- ls(funs, all.names = TRUE)
+    vnames <- ls(vars, all.names = TRUE)
     if (merge)
         sort(unique(c(vnames, fnames)))
     else list(functions = fnames, variables = vnames)
@@ -697,16 +697,16 @@ checkUsageStartLocals <- function(parnames, locals, w) {
     attr(env, "checkUsageFrame") <- env # for sanity check
     mkentry <- function(parameter) {
         entry <- mkHash()
-        assign("parameter", parameter, env = entry)
-        assign("assigns", 0, env = entry)
-        assign("varuses", 0, env = entry)
-        assign("funuses", 0, env = entry)
-        assign("funforms", NULL, env = entry)
-        assign("loopvars", 0, env = entry)
+        assign("parameter", parameter, envir = entry)
+        assign("assigns", 0, envir = entry)
+        assign("varuses", 0, envir = entry)
+        assign("funuses", 0, envir = entry)
+        assign("funforms", NULL, envir = entry)
+        assign("loopvars", 0, envir = entry)
         entry
     }
-    for (v in parnames) assign(v, mkentry(TRUE), env = env)
-    for (v in nplocals) assign(v, mkentry(FALSE), env = env)
+    for (v in parnames) assign(v, mkentry(TRUE), envir = env)
+    for (v in nplocals) assign(v, mkentry(FALSE), envir = env)
 }
 
 getLocalUsageEntry <- function(vn, w) {
@@ -714,7 +714,7 @@ getLocalUsageEntry <- function(vn, w) {
     if (is.baseenv(env)) stop("no local variable entry")
     if (! identical(env, attr(env, "checkUsageFrame")))
         stop("sanity check on local usage frame failed")
-    entry <- get(vn, env = env, inherits = FALSE)
+    entry <- get(vn, envir = env, inherits = FALSE)
     if (! is.environment(entry)) stop("bad local variable entry")
     entry
 }
@@ -723,7 +723,7 @@ getLocalUsageValue <- function(vn, which, w)
     get(which, getLocalUsageEntry(vn, w), inherits = FALSE)
 
 setLocalUsageValue <- function(vn, which, value, w)
-    assign(which, value, env = getLocalUsageEntry(vn, w))
+    assign(which, value, envir = getLocalUsageEntry(vn, w))
 
 incLocalUsageValue <- function(vn, which, w) {
     entry <- getLocalUsageEntry(vn, w)
@@ -759,7 +759,7 @@ suppressVar <- function(n, suppress) {
 #**** need test code
 #**** merge warnings?
 checkUsageFinishLocals <- function(w) {
-    vars <- ls(w$env, all = TRUE)
+    vars <- ls(w$env, all.names = TRUE)
     for (v in vars) {
         if (! suppressVar(v, w$suppressLocal)) {
             parameter <- getLocalUsageValue(v, "parameter", w)
@@ -812,9 +812,9 @@ checkUsageFinishLocals <- function(w) {
 #**** merge warnings?
 checkUsageEnterGlobal <- function(type, n, e, w) {
     if (type == "function") {
-        if (exists(n, env = w$globalenv, mode = "function")) {
+        if (exists(n, envir = w$globalenv, mode = "function")) {
             # **** better call check here
-            def <- get(n, env = w$globalenv, mode = "function")
+            def <- get(n, envir = w$globalenv, mode = "function")
             if (typeof(def) == "closure")
                 checkCall(def, e, function(m) w$signal(m, w))
             else checkPrimopCall(n, e, function(m) w$signal(m, w))
@@ -868,8 +868,8 @@ checkUsage <- function(fun, name = "<anonymous>",
                  suppressUndefined = suppressUndefined)
 
 checkUsageEnv <- function(env, ...) {
-    for (n in ls(env, all=TRUE)) {
-        v <- get(n, env = env)
+    for (n in ls(env, all.names=TRUE)) {
+        v <- get(n, envir = env)
         if (typeof(v)=="closure")
             checkUsage(v, name = n, ...)
     }
@@ -888,15 +888,15 @@ primopArgCounts <- mkHash()
 
 checkPrimopCall <- function(fn, e, signal = warning0) {
     if (exists(".GenericArgsEnv") && exists(fn, get(".GenericArgsEnv"))) {
-        def <- get(fn, env = get(".GenericArgsEnv"))
+        def <- get(fn, envir = get(".GenericArgsEnv"))
         checkCall(def, e, signal)
     }
     else if (exists(".ArgsEnv") && exists(fn, get(".ArgsEnv"))) {
-        def <- get(fn, env = get(".ArgsEnv"))
+        def <- get(fn, envir = get(".ArgsEnv"))
         checkCall(def, e, signal)
     }
-    else if (exists(fn, env = primopArgCounts, inherits = FALSE)) {
-        argc <- get(fn, env = primopArgCounts)
+    else if (exists(fn, envir = primopArgCounts, inherits = FALSE)) {
+        argc <- get(fn, envir = primopArgCounts)
         if (! any(argc == (length(e) - 1))) {
             signal(paste("wrong number of arguments to", sQuote(fn)))
             FALSE
@@ -909,10 +909,10 @@ checkPrimopCall <- function(fn, e, signal = warning0) {
 local({
     zeroArgPrims <- c("break", "browser", "gc.time", "globalenv",
                       "interactive", "nargs", "next", "proc.time")
-    for (fn in zeroArgPrims) assign(fn, 0, env = primopArgCounts)
+    for (fn in zeroArgPrims) assign(fn, 0, envir = primopArgCounts)
 
     zeroOrOneArgPrims <- c("invisible")
-    for (fn in zeroOrOneArgPrims) assign(fn, 0:1, env = primopArgCounts)
+    for (fn in zeroOrOneArgPrims) assign(fn, 0:1, envir = primopArgCounts)
 
     oneArgPrims <- c("!", "(", "abs", "sqrt", "cos", "sin", "tan", "acos",
                      "asin", "atan", "Re", "Im", "Mod", "Arg", "Conj",
@@ -933,17 +933,17 @@ local({
                      "cummax", "cummin", "dim", "dimnames", "exp", "missing",
                      "pos.to.env", ".primTrace", ".primUntrace",
                      "symbol.C", "symbol.For")
-    for (fn in oneArgPrims) assign(fn, 1, env = primopArgCounts)
+    for (fn in oneArgPrims) assign(fn, 1, envir = primopArgCounts)
 
     oneOrTwoArgPrims <- c("+", "-")
-    for (fn in oneOrTwoArgPrims) assign(fn, 1:2, env = primopArgCounts)
+    for (fn in oneOrTwoArgPrims) assign(fn, 1:2, envir = primopArgCounts)
 
     twoArgPrims <- c("*", "/", "%%", "^", "<", "<=", "==", ">", ">=",
                      "|", "||", ":", "!=", "&", "&&", "%/%", "%*%",
                      "while", "attr", "attributes<-", "class<-",
                      "oldClass<-", "dim<-", "dimnames<-", "environment<-",
                      "length<-", "reg.finalizer")
-    for (fn in twoArgPrims) assign(fn, 2, env = primopArgCounts)
+    for (fn in twoArgPrims) assign(fn, 2, envir = primopArgCounts)
 
     assign("on.exit", 0:2, primopArgCounts)
 })
@@ -958,7 +958,7 @@ checkCall <- function(def, call, signal = warning0) {
     msg <- try({testMatch(); NULL}, silent = TRUE)
     if (! is.null(msg)) {
         msg<-sub("\n$","",sub("^E.*: ","",msg))
-        emsg<-paste("possible error in ", deparse(call, width = 500),
+        emsg<-paste("possible error in ", deparse(call, width.cutoff = 500),
                     ": ", msg, sep="")
         if (! is.null(signal)) signal(emsg)
         FALSE
