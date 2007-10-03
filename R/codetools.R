@@ -187,7 +187,7 @@ getCollectLocalsHandler <- function(v, w) {
 dropMissings <- function(x) {
     lx <- as.list(x)
     ix <- rep(TRUE, length(x))
-    for (i in seq(along = ix)) {
+    for (i in seq_along(ix)) {
         a <- lx[[i]]
         if (missing(a)) ix[i] <- FALSE
     }

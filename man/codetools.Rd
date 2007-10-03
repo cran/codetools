@@ -60,14 +60,9 @@ walkCode(e, w = makeCodeWalker())
   \item{signal}{function.}
 }
 \description{
-  These functions provide an some tools for analysing R code.  Mainly
+  These functions provide some tools for analysing R code.  Mainly
   indented to support the other tools in this package and byte code
   compilation.
 }
-\details{
-}
 \author{Luke Tierney}
-
-\examples{
-}
 \keyword{programming}
