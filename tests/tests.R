@@ -77,6 +77,9 @@ assert(identical(flattenAssignment(quote(f(g(h(k(x, 4), 3), 2), 1))),
                           quote("g<-"(`*tmp*`, 2, value = `*tmpv*`)),
                           quote("h<-"(`*tmp*`, 3, value = `*tmpv*`)),
                           quote("k<-"(x, 4, value = `*tmpv*`))))))
+assert(! "y" %in% findGlobals(function() if (is.R()) x else y))
 # **** need more test cases here
 assert(identical(sort(findGlobals(function(x) { z <- 1; x + y + z})),
                  sort(c("<-", "{",  "+",  "y"))))
+
+assert(identical(findGlobals(function() Quote(x)), "Quote"))

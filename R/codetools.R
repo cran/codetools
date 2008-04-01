@@ -109,8 +109,27 @@ constantFold <- function(e, env = NULL, fail = NULL) {
     }
     callCC(job)
 }
+constantFoldEnv <- function(e, env = .GlobalEnv, fail = NULL) {
+    isLocal <- function(v, w) {
+        vname <- as.character(v)
+        while (! identical(env, .GlobalEnv)) {
+            if (exists(vname, env, inherits = FALSE))
+                return(TRUE)
+            env <- parent.env(env)
+        }
+        FALSE
+    }
+    job <- function(exit) {
+        doExit <- function(e, w) exit(fail)
+        w <- makeConstantFolder(isLocal = isLocal, exit = doExit)
+        walkCode(e, w)
+    }
+    tryCatch(callCC(job), error = function(e) fail)
+}
 isConstantValue <- function(v, w)
-    is.null(v) || (is.null(attributes(v)) && is.atomic(v))
+    is.null(v) ||
+    (is.null(attributes(v)) && is.atomic(v)) ||
+    (is.list(v) && (identical(v, .Platform) || identical(v, .Machine)))
 isFoldable <- function(v, w)
     ((typeof(v) == "symbol" || typeof(v) == "character") &&
      as.character(v) %in% foldFuns && ! w$isLocal(v, w))
@@ -122,8 +141,9 @@ foldFuns <- c("+", "-", "*", "/", "^", "(",
               "c", "as.integer", "vector", "integer","numeric","character",
               "rep",
               ":",
-              "cos", "sin", "tan", "acos", "asin", "atan", "atan2")
-constNames <- c("pi", "T", "F")
+              "cos", "sin", "tan", "acos", "asin", "atan", "atan2",
+              "is.R", "$", "[", "[[")
+constNames <- c("pi", "T", "F", ".Platform", ".Machine")
 
 foldLeaf <- function(e, w) {
     if (is.name(e) && as.character(e) %in% constNames && ! w$isLocal(e, w))
@@ -132,9 +152,16 @@ foldLeaf <- function(e, w) {
     e
 }
 foldCall <- function(e, w) {
-    args <- lapply(e[-1], function(e) walkCode(e, w))
-    if (all(sapply(args, w$isConstant, w))) { # should be true
-        fname <- as.character(e[[1]])
+    fname <- as.character(e[[1]])
+    if (fname == "$") {
+        args <- list(walkCode(e[[2]], w), e[[3]])
+        foldable <- w$isConstant(args[[1]], w)
+    }
+    else {
+        args <- lapply(e[-1], function(e) walkCode(e, w))
+        foldable <- all(sapply(args, w$isConstant, w))
+    }
+    if (foldable) {
         msg <- try({ v <- do.call(fname, args); NULL }, silent = TRUE)
         if (! is.null(msg)) {
             w$signal(e, msg, w)
@@ -172,6 +199,7 @@ getCollectLocalsHandler <- function(v, w) {
            "local" = if (! w$isLocal(v, w))
                collectLocalsLocalHandler,
            "expression" =,
+           "Quote" =,
            # **** could add handler for bquote here that looks at the .()'s
            "quote" = if (! w$isLocal(v, w))
                function(e, w) character(0),
@@ -217,7 +245,7 @@ collectLocalsLocalHandler <- function(e, w) {
     else for (a in dropMissings(e[-1])) walkCode(a, w)
 }
 findLocalsList <- function(elist, envir = .BaseEnv) {
-    localStopFuns <- c("expression", "quote", "local")
+    localStopFuns <- c("expression", "quote", "Quote", "local")
     if (is.character(envir))
         locals <- envir
     else
@@ -436,7 +464,8 @@ addCollectUsageHandler <- function(v, where, fun)
 getCollectUsageHandler <- function(v, w)
     if (exists(v, envir = collectUsageHandlers, inherits = FALSE) &&
         (isBaseVar(v, w$env) ||
-         isStatsVar(v, w$env) || isUtilsVar(v, w$env)) )  # **** for now
+         isStatsVar(v, w$env) || isUtilsVar(v, w$env) || # **** for now
+         v == "Quote" ))  # **** yet another glorious hack!!!
         get(v, envir = collectUsageHandlers)
 ##**** this is (yet another) temporary hack
 isStatsVar <- function(v, env) {
@@ -527,6 +556,7 @@ local({
         w$enterGlobal("function", as.character(e[[1]]), e, w)
     addCollectUsageHandler("~", "base", h)
     addCollectUsageHandler("quote", "base", h)
+    addCollectUsageHandler("Quote", "methods", h)
     addCollectUsageHandler("expression", "base", h)
     addCollectUsageHandler("::", "base", h)
     addCollectUsageHandler(":::", "base", h)
@@ -665,6 +695,17 @@ addCollectUsageHandler("quasi", "stats", function(e, w) {
     w$enterGlobal("function", "quasi", e, w)
     # **** don't look at arguments for now.  Need to use match.call
     # **** to get this right and trap errors. Later ...
+})
+
+addCollectUsageHandler("if", "base", function(e, w) {
+    w$enterGlobal("function", "if", e, w)
+    test <- constantFoldEnv(e[[2]], w$env)
+    if (is.logical(test) && length(test) == 1 && ! is.na(test)) {
+        walkCode(e[[2]], w)
+        if (test) walkCode(e[[3]], w)
+        else walkCode(e[[4]], w)
+    }
+    else collectUsageArgs(e, w)
 })
 
 ##
