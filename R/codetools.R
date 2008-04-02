@@ -703,7 +703,7 @@ addCollectUsageHandler("if", "base", function(e, w) {
     if (is.logical(test) && length(test) == 1 && ! is.na(test)) {
         walkCode(e[[2]], w)
         if (test) walkCode(e[[3]], w)
-        else walkCode(e[[4]], w)
+        else if (length(e) > 3) walkCode(e[[4]], w)
     }
     else collectUsageArgs(e, w)
 })
