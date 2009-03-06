@@ -51,8 +51,11 @@ showTreeCall <- function(e, w) {
     w$write("(")
     walkCode(e[[1]], w)
     for (a in as.list(e[-1])) {
-        w$write(" ");
-        walkCode(a, w);
+        w$write(" ")
+        if (missing(a))
+            w$write("<Missing>")
+        else
+            walkCode(a, w)
     }
     w$write(")")
 }
