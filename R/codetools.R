@@ -378,6 +378,9 @@ makeUsageCollector <- function(fun, ..., name = NULL,
                    globalenv = environment(fun),
                    env = environment(fun),
                    name = NULL,
+                   srcfile = NULL,
+                   frow = NULL,
+                   lrow = NULL,
                    isLocal = collectUsageIsLocal)
 }
 
@@ -439,8 +442,17 @@ collectUsageFun <- function(name, formals, body, w) {
     w$finishCollectLocals(w)
 }
 
-signalUsageIssue <- function(m, w)
-    w$warn(paste(paste(w$name, collapse = " : "), ": ", m, "\n", sep = ""))
+signalUsageIssue <- function(m, w) {
+    if (!is.null(w$frow) && !is.na(w$frow)) {
+        fname <- w$srcfile
+        if (w$frow == w$lrow)
+            loc <- paste(" (", fname, ":",  w$frow, ")", sep = "")
+        else loc <- paste(" (", fname, ":", w$frow, "-", w$lrow, ")", sep = "")
+    }
+    else loc <- NULL
+
+    w$warn(paste(paste(w$name, collapse = " : "), ": ", m, loc, "\n", sep = ""))
+}
 
 # **** is this the right handling of ..n things?
 # **** signal (possible) error if used in wrong context?
@@ -550,6 +562,21 @@ addCollectUsageHandler("for", "base", function(e, w) {
     w$enterLocal("for", v, e, w)
     walkCode(e[[3]], w)
     walkCode(e[[4]], w)
+})
+
+addCollectUsageHandler("{", "base", function(e, w) {
+    w$enterGlobal("function", "{", e, w)
+    w$srcfile <- attr(e, "srcfile")$filename
+    
+    if (length(e)>1){
+        for ( i in 2 : length(e)){      
+            if ( !is.null(attr(e, "srcref")[[i]])){
+                w$frow <- attr(e, "srcref")[[i]][[1]]
+                w$lrow <- attr(e, "srcref")[[i]][[3]]
+            }
+            walkCode(e[[i]], w)
+        }
+    }
 })
 
 #**** is this the right way to handle :: and ::: ??
@@ -747,6 +774,7 @@ checkUsageStartLocals <- function(parnames, locals, w) {
         assign("funuses", 0, envir = entry)
         assign("funforms", NULL, envir = entry)
         assign("loopvars", 0, envir = entry)
+        assign("srcinfo", NULL, envir = entry)
         entry
     }
     for (v in parnames) assign(v, mkentry(TRUE), envir = env)
@@ -775,6 +803,19 @@ incLocalUsageValue <- function(vn, which, w) {
     assign(which, value + 1, entry)
 }
 
+incLocalSrcInfo <- function(vn, w) {
+    entry <- getLocalUsageEntry(vn, w)
+    value <- get("srcinfo", entry, inherits = FALSE)
+    new <- list(srcfile = if (is.null(w$srcfile)) NA_character_ else w$srcfile,
+                frow = if (is.null(w$frow)) NA_integer_ else w$frow,
+                lrow = if (is.null(w$lrow)) NA_integer_ else w$lrow)
+    if (is.null(value))
+        value <- as.data.frame(new, stringsAsFactors = FALSE)
+    else
+        value <- rbind(value, new)
+    assign("srcinfo", value, entry)
+}
+
 addLocalFunDef <- function(vn, e, w) {
     entry <- getLocalUsageEntry(vn, w)
     value <- get("funforms", entry, inherits = FALSE)
@@ -791,6 +832,7 @@ checkUsageEnterLocal <- function(type, n, e, w) {
         "function" = incLocalUsageValue(n, "funuses", w),
         "for" = incLocalUsageValue(n, "loopvars", w),
         "fundef" = addLocalFunDef(n, e, w))
+    incLocalSrcInfo(n,w)
 }
 
 suppressVar <- function(n, suppress) {
@@ -813,6 +855,12 @@ checkUsageFinishLocals <- function(w) {
             loopvars <- getLocalUsageValue(v, "loopvars", w)
             funforms <- getLocalUsageValue(v, "funforms", w)
             uses <- max(varuses, funuses, loopvars)
+
+            srcinfo <- getLocalUsageValue(v, "srcinfo", w)
+            w$srcfile <- srcinfo[1,"srcfile"]
+            w$frow <- srcinfo[1,"frow"]
+            w$lrow <- srcinfo[1,"lrow"]
+
             if (parameter) {
                 if (! suppressVar(v, w$suppressParamAssigns) && assigns > 0)
                     w$signal(paste("parameter", sQuote(v),
@@ -861,7 +909,10 @@ checkUsageEnterGlobal <- function(type, n, e, w) {
             def <- get(n, envir = w$globalenv, mode = "function")
             if (typeof(def) == "closure")
                 checkCall(def, e, function(m) w$signal(m, w))
-            else checkPrimopCall(n, e, function(m) w$signal(m, w))
+            else {
+                isBuiltin <- typeof(def) == "builtin"
+                checkPrimopCall(n, e, isBuiltin, function(m) w$signal(m, w))
+            }
         }
         else if (! suppressVar(n, w$suppressUndefined))
             w$signal(paste("no visible global function definition for",
@@ -895,7 +946,14 @@ checkUsage <- function(fun, name = "<anonymous>",
                        suppressLocalUnused = FALSE,
                        suppressNoLocalFun = ! all,
                        skipWith = FALSE,
-                       suppressUndefined = dfltSuppressUndefined)
+                       suppressUndefined = dfltSuppressUndefined,
+                       suppressPartialMatchArgs = TRUE) {
+    if (is.null(getOption("warnPartialMatchArgs")))
+        options(warnPartialMatchArgs = FALSE)
+    if (! suppressPartialMatchArgs) {
+        oldOpts <- options(warnPartialMatchArgs = TRUE)
+        on.exit(options(oldOpts))
+    }
     collectUsage(fun, name = name,
                  warn = report,
                  suppressLocal = suppressLocal,
@@ -909,7 +967,9 @@ checkUsage <- function(fun, name = "<anonymous>",
                  enterLocal = checkUsageEnterLocal,
                  startCollectLocals = checkUsageStartLocals,
                  finishCollectLocals = checkUsageFinishLocals,
-                 suppressUndefined = suppressUndefined)
+                 suppressUndefined = suppressUndefined,
+                 suppressPartialMatchArgs = suppressPartialMatchArgs)
+}
 
 checkUsageEnv <- function(env, ...) {
     for (n in ls(env, all.names=TRUE)) {
@@ -930,7 +990,22 @@ checkUsagePackage <- function(pack, ...) {
 
 primopArgCounts <- mkHash()
 
-checkPrimopCall <- function(fn, e, signal = warning0) {
+anyMissing <- function(args) {
+    for (i in 1:length(args)) {
+        a <-args[[i]]
+        if (missing(a)) return(TRUE) #**** better test?
+    }
+    return(FALSE)
+}
+
+noMissingAllowed <- c("c")
+
+checkPrimopCall <- function(fn, e, isBuiltin, signal = warning0) {
+    if (anyMissing(e[-1])) {
+        if (isBuiltin || fn %in% noMissingAllowed)
+            signal(paste("missing arguments not allowed calls toin",
+                         sQuote(fn)))
+    }                   
     if (exists(".GenericArgsEnv") && exists(fn, get(".GenericArgsEnv"))) {
         def <- get(fn, envir = get(".GenericArgsEnv"))
         checkCall(def, e, signal)
@@ -998,12 +1073,22 @@ matchName <- function(name, list)
 findVar <- function(e, env) matchName(e, env)
 
 checkCall <- function(def, call, signal = warning0) {
-    testMatch <- function(...) match.call(def, call, FALSE)
-    msg <- try({testMatch(); NULL}, silent = TRUE)
+    testMatch <- function(...) 
+        ## withCallingHandlers is used to capture partial argument
+        ## matcing warnings if enabled.
+        withCallingHandlers(match.call(def, call, FALSE),
+            warning = function(w) {
+                msg <- conditionMessage(w)
+                signal(paste("warning in ",
+                             deparse(call, width.cutoff = 500),
+                             ": ", msg, sep=""))
+                invokeRestart("muffleWarning")
+            })
+    msg <- tryCatch({testMatch(); NULL},
+                    error = function(e) conditionMessage(e))
     if (! is.null(msg)) {
-        msg<-sub("\n$","",sub("^E.*: ","",msg))
-        emsg<-paste("possible error in ", deparse(call, width.cutoff = 500),
-                    ": ", msg, sep="")
+        emsg <- paste("possible error in ", deparse(call, width.cutoff = 500),
+                      ": ", msg, sep="")
         if (! is.null(signal)) signal(emsg)
         FALSE
     }

@@ -5,7 +5,8 @@ checkUsage(fun, name = "<anonymous>", report = cat, all = FALSE,
            suppressLocal = FALSE, suppressParamAssigns = !all,
            suppressParamUnused = !all, suppressFundefMismatch = FALSE,
            suppressLocalUnused = FALSE, suppressNoLocalFun = !all,
-           skipWith = FALSE, suppressUndefined = dfltSuppressUndefined) 
+           skipWith = FALSE, suppressUndefined = dfltSuppressUndefined,
+           suppressPartialMatchArgs = TRUE) 
 checkUsageEnv(env, ...) 
 checkUsagePackage(pack, ...) 
 }
@@ -36,6 +37,9 @@ checkUsagePackage(pack, ...)
                   \code{with} expressions.}
   \item{suppressUndefined}{suppress warnings about undefined global
                           functions and variables.}
+
+  \item{suppressPartialMatchArgs}{suppress warnings about partial
+                                  argument matching}
 }
 \description{
   Check R code for possible problems.
