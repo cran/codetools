@@ -1003,7 +1003,7 @@ noMissingAllowed <- c("c")
 checkPrimopCall <- function(fn, e, isBuiltin, signal = warning0) {
     if (anyMissing(e[-1])) {
         if (isBuiltin || fn %in% noMissingAllowed)
-            signal(paste("missing arguments not allowed calls toin",
+            signal(paste("missing arguments not allowed in calls to",
                          sQuote(fn)))
     }                   
     if (exists(".GenericArgsEnv") && exists(fn, get(".GenericArgsEnv"))) {
