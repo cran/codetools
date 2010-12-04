@@ -77,6 +77,10 @@ assert(identical(flattenAssignment(quote(f(g(h(k(x, 4), 3), 2), 1))),
                           quote("g<-"(`*tmp*`, 2, value = `*tmpv*`)),
                           quote("h<-"(`*tmp*`, 3, value = `*tmpv*`)),
                           quote("k<-"(x, 4, value = `*tmpv*`))))))
+if (getRversion() >= "2.13.0")
+    assert(identical(flattenAssignment(quote(base::diag(x))),
+                     list(list(quote(x)),
+                          list(quote(base::`diag<-`(x, value = `*tmpv*`))))))
 assert(! "y" %in% findGlobals(function() if (is.R()) x else y))
 assert(identical(findGlobals(function() if (FALSE) x), "if"))
 # **** need more test cases here

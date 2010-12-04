@@ -333,9 +333,8 @@ apdef <- function(e) {
     tmp <- as.name("*tmp*")
     tmpv <- as.name("*tmpv*")
     while (typeof(e) == "language") {
-        fun <- paste(as.character(checkSymOrString(e[[1]])), "<-", sep = "")
         ef <- e
-        ef[[1]] <- as.name(fun)
+        ef[[1]] <- makeAssgnFcn(e[[1]])
         if (typeof(ef[[2]]) == "language")
             ef[[2]] <- tmp
         ef$value <- tmpv
@@ -343,6 +342,22 @@ apdef <- function(e) {
         e <- e[[2]]
     }
     v
+}
+makeAssgnFcn <- function(fun) {
+    if (typeof(fun) == "symbol" || typeof(fun) == "string")
+        as.name(paste(as.character(fun), "<-", sep = ""))
+    else {
+        if (getRversion() >= "2.13.0" &&
+            typeof(fun) == "language" && typeof(fun[[1]]) == "symbol" &&
+            as.character(fun[[1]]) %in% c("::", ":::") &&
+            length(fun) == 3 && typeof(fun[[3]]) == "symbol") {
+            fun[[3]] <- as.name(paste(as.character(fun[[3]]), "<-", sep = ""))
+            fun
+        }
+        else
+            stop(sQuote(deparse(fun)),
+                 " is not a valid function in complex assignments")
+   }
 }
 flattenAssignment <- function(e) {
     if (typeof(e) == "language")
