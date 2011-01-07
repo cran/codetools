@@ -263,17 +263,16 @@ findLocalsList <- function(elist, envir = .BaseEnv) {
         env <- mkHash()
         for (e in elist) walkCode(e, w)
         isloc <- sapply(sf, exists, envir = env, inherits = FALSE)
-        if (nsf == length(locals) || length(sf[isloc] == nsf)) {
+        last.nsf <- nsf
+        sf <- unique(c(locals, sf[isloc]))
+        nsf <- length(sf)
+        if (last.nsf == nsf) {
             vals <- ls(env, all.names = TRUE)
             rdsf <- vals %in% specialSyntaxFuns
             if (any(rdsf))
                 warning0(paste("local assignments to syntactic functions:",
                                vals[rdsf]))
             return(vals)
-        }
-        else {
-            sf <- unique(c(locals, sf[isloc]))
-            nsf <- length(sf)
         }
     }
 }
