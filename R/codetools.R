@@ -969,21 +969,26 @@ checkUsage <- function(fun, name = "<anonymous>",
         oldOpts <- options(warnPartialMatchArgs = TRUE)
         on.exit(options(oldOpts))
     }
-    collectUsage(fun, name = name,
-                 warn = report,
-                 suppressLocal = suppressLocal,
-                 suppressParamAssigns = suppressParamAssigns,
-                 suppressParamUnused = suppressParamUnused,
-                 suppressFundefMismatch = suppressFundefMismatch,
-                 suppressLocalUnused = suppressLocalUnused,
-                 suppressNoLocalFun = suppressNoLocalFun,
-                 skipWith = skipWith,
-                 enterGlobal = checkUsageEnterGlobal,
-                 enterLocal = checkUsageEnterLocal,
-                 startCollectLocals = checkUsageStartLocals,
-                 finishCollectLocals = checkUsageFinishLocals,
-                 suppressUndefined = suppressUndefined,
-                 suppressPartialMatchArgs = suppressPartialMatchArgs)
+    tryCatch(collectUsage(fun, name = name,
+                          warn = report,
+                          suppressLocal = suppressLocal,
+                          suppressParamAssigns = suppressParamAssigns,
+                          suppressParamUnused = suppressParamUnused,
+                          suppressFundefMismatch = suppressFundefMismatch,
+                          suppressLocalUnused = suppressLocalUnused,
+                          suppressNoLocalFun = suppressNoLocalFun,
+                          skipWith = skipWith,
+                          enterGlobal = checkUsageEnterGlobal,
+                          enterLocal = checkUsageEnterLocal,
+                          startCollectLocals = checkUsageStartLocals,
+                          finishCollectLocals = checkUsageFinishLocals,
+                          suppressUndefined = suppressUndefined,
+                          suppressPartialMatchArgs = suppressPartialMatchArgs),
+             error = function(e) {
+                         report(paste0(name, ": Error while checking: ",
+                                       conditionMessage(e), "\n"))
+                     })
+    invisible(NULL)         
 }
 
 checkUsageEnv <- function(env, ...) {

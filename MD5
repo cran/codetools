@@ -1,0 +1,8 @@
+965f67cc4d583191f8dc7ca68ea6322a *DESCRIPTION
+d7d4587719d6cbb3083123501ec23dd3 *NAMESPACE
+a8491d322df16312a7abff9786511121 *R/codetools.R
+2af77179b93b37abb2717ba0dacd60a3 *man/checkUsage.Rd
+215ca204e6c7206111e585206cee095c *man/codetools.Rd
+31aabac379a9264e4ce819755b95b601 *man/findGlobals.Rd
+7915e973bb95db1197db9152d339f2c8 *man/showTree.Rd
+838118aa4116e6b2d66e393dae8e4073 *tests/tests.R
