@@ -1092,11 +1092,21 @@ matchName <- function(name, list)
 
 findVar <- function(e, env) matchName(e, env)
 
+      matchCall <- function(def, call, ...) {
+    ## the ... machinations are needed to prevent match.call from signaling
+    ## an error when the call contains a ... argument, and to work with
+    ## versions of match.call that do or do not have the envir argument
+    ## added for R 3.2.0
+    fun <- function(...) 
+        match.call(def, call, FALSE)
+    fun()
+}
+
 checkCall <- function(def, call, signal = warning0) {
-    testMatch <- function(...) 
+    testMatch <- function() 
         ## withCallingHandlers is used to capture partial argument
-        ## matcing warnings if enabled.
-        withCallingHandlers(match.call(def, call, FALSE),
+        ## matching warnings if enabled.
+        withCallingHandlers(matchCall(def, call),
             warning = function(w) {
                 msg <- conditionMessage(w)
                 signal(paste("warning in ",
