@@ -499,7 +499,8 @@ getCollectUsageHandler <- function(v, w)
 ##**** this is (yet another) temporary hack
 isStatsVar <- function(v, env) {
     e <- findOwnerEnv(v, env)
-    if (exists(v, envir = e, inherits = FALSE, mode = "function")) {
+    if (! identical(e, NA) &&
+        exists(v, envir = e, inherits = FALSE, mode = "function")) {
         f <- get(v, envir = e, inherits = FALSE, mode = "function")
         identical(environment(f), getNamespace("stats"))
     }
@@ -507,7 +508,8 @@ isStatsVar <- function(v, env) {
 }
 isUtilsVar <- function(v, env) {
     e <- findOwnerEnv(v, env)
-    if (exists(v, envir = e, inherits = FALSE, mode = "function")) {
+    if (! identical(e, NA) &&
+        exists(v, envir = e, inherits = FALSE, mode = "function")) {
         f <- get(v, envir = e, inherits = FALSE, mode = "function")
         identical(environment(f), getNamespace("utils"))
     }
@@ -518,6 +520,9 @@ isSimpleFunDef <- function(e, w)
     typeof(e[[2]]) != "language" && typeof(e[[3]]) == "language" &&
     typeof(e[[3]][[1]]) %in% c("symbol", "character") &&
     e[[3]][[1]] == "function" && isBaseVar("function", w$env)
+
+isClosureFunDef <- function(e, w)
+    typeof(e[[2]]) != "language" && typeof(e[[3]]) == "closure"
 
 checkDotsAssignVar <- function(v, w) {
     if (v == "...") {
@@ -540,6 +545,12 @@ local({
         w$enterLocal("<-", v, e, w)
         if (isSimpleFunDef(e, w))
             collectUsageFun(v, e[[3]][[2]], e[[3]][[3]], w)
+        else if (isClosureFunDef(e, w)) { ## to handle inlined S4 methods
+            fun <- e[[3]]
+            w$globalenv <- environment(fun)
+            w$env = environment(fun)
+            collectUsageFun(v, formals(fun), body(fun), w)
+        }            
         else {
             if (typeof(e[[2]]) == "language") {
                 fa <- flattenAssignment(e[[2]])
