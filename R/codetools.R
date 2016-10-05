@@ -343,14 +343,14 @@ apdef <- function(e) {
     v
 }
 makeAssgnFcn <- function(fun) {
-    if (typeof(fun) == "symbol" || typeof(fun) == "string")
-        as.name(paste(as.character(fun), "<-", sep = ""))
+    if (typeof(fun) == "symbol")
+        as.name(paste0(as.character(fun), "<-"))
     else {
         if (getRversion() >= "2.13.0" &&
             typeof(fun) == "language" && typeof(fun[[1]]) == "symbol" &&
             as.character(fun[[1]]) %in% c("::", ":::") &&
             length(fun) == 3 && typeof(fun[[3]]) == "symbol") {
-            fun[[3]] <- as.name(paste(as.character(fun[[3]]), "<-", sep = ""))
+            fun[[3]] <- as.name(paste0(as.character(fun[[3]]), "<-"))
             fun
         }
         else
