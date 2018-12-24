@@ -61,7 +61,7 @@ walkCode(e, w = makeCodeWalker())
 }
 \description{
   These functions provide some tools for analysing R code.  Mainly
-  indented to support the other tools in this package and byte code
+  intended to support the other tools in this package and byte code
   compilation.
 }
 \author{Luke Tierney}

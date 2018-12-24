@@ -376,8 +376,10 @@ makeUsageCollector <- function(fun, ..., name = NULL,
                                finishCollectLocals = doNothing,
                                warn = warning0,
                                signal = signalUsageIssue) {
-    if (typeof(fun) != "closure")
-        stop("only works for closures")
+    if (typeof(fun) == "closure")
+        env <- environment(fun)
+    else
+        env <- .GlobalEnv
     makeCodeWalker(..., name = name,
                    enterLocal = enterLocal,
                    enterGlobal = enterGlobal,
@@ -389,8 +391,8 @@ makeUsageCollector <- function(fun, ..., name = NULL,
                    leaf = collectUsageLeaf,
                    call = collectUsageCall,
                    handler = getCollectUsageHandler,
-                   globalenv = environment(fun),
-                   env = environment(fun),
+                   globalenv = env,
+                   env = env,
                    name = NULL,
                    srcfile = NULL,
                    frow = NULL,
@@ -764,7 +766,7 @@ addCollectUsageHandler("if", "base", function(e, w) {
 })
 
 ##
-## Finding globa variables
+## Finding global variables
 ##
 
 findGlobals <- function(fun, merge = TRUE) {

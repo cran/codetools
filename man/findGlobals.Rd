@@ -5,12 +5,13 @@ findGlobals(fun, merge = TRUE)
 }
 \alias{findGlobals}
 \arguments{
-  \item{fun}{closure.}
+  \item{fun}{function object; usually a closure.}
   \item{merge}{logical}
 }
 \value{
   Character vector if \code{merge} is true; otherwise, a list with
-  \code{functions} and \code{variables} components.
+  \code{functions} and \code{variables} character vector components.
+  Character vectors are of length zero For non-closures.
 }
 \description{
   Finds global functions and variables used by a closure.
