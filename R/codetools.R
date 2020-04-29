@@ -204,6 +204,7 @@ getCollectLocalsHandler <- function(v, w) {
            "expression" =,
            "Quote" =,
            # **** could add handler for bquote here that looks at the .()'s
+           "bquote" =,
            "quote" = if (! w$isLocal(v, w))
                function(e, w) character(0),
            "delayedAssign" =,
