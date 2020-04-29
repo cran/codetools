@@ -696,6 +696,24 @@ addCollectUsageHandler("bquote", "base", function(e, w) {
         a <- e[[3]]
         if (! missing(a)) walkCode(a, w)
     }
+    # we create a new handler
+    # that only handles .() and checks for usage there
+    wNew <- w
+    wNew$leaf <- function(e, w) NULL
+    wNew$handler <- function(v, wL) {
+        if (v == ".") {
+            function(e, wL2) {
+                e2 <- e[[2]]
+                e2_type <- typeof(e2)
+                if (e2_type  == "symbol") {
+                    collectUsageLeaf(e2, w)
+                } else if (e2_type == "language") {
+                    collectUsageCall(e2, w)
+                }
+            }
+        }
+    }
+    walkCode(e[[2]], wNew)
 })
 addCollectUsageHandler("library", "base", function(e, w) {
     w$enterGlobal("function", "library", e, w)
