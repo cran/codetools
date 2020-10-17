@@ -1,0 +1,2832 @@
+\documentclass[11pt]{article}
+\usepackage{times}
+\usepackage{mathptmx}
+\usepackage{fullpage}
+\usepackage{verbatim}
+\usepackage{noweb}
+
+\makeatletter
+\addto@hook{\every@verbatim}{\nowebsize\setlength{\leftmargin}{50mm}}
+\def\verbatim@processline{\hspace{\codemargin}\the\verbatim@line\par}
+\makeatother
+
+% The following try to prevent wasteful page breaks
+\def\nwendcode{\endtrivlist \endgroup}
+\let\nwdocspar=\par
+
+%\pagestyle{noweb}
+\bibliographystyle{plain}
+
+%\usepackage[fullpage]{mynoweb}
+
+\noweboptions{noidentxref,longchunks,smallcode}
+
+\title{Code Analysis Tools for R}
+\author{Luke Tierney\\
+        Department of Statistics and Actuarial Science\\
+        University of Iowa}
+
+\begin{document}
+\maketitle
+
+\section{A Simple Code Walker}
+This code walker abstracts the process of traversing a parsed R
+expression.  The particulars of traversal are controlled by the
+[[call]], [[handler]] and [[leaf]] functions in the walker structure.
+The [[handler]] function allows calls to particular functions to be
+handled specially.  The walker can be used for its side effects only
+or to produce a result. Both approaches are illustated in subsequent
+sections.
+<<walkCode>>=
+walkCode <- function(e, w = makeCodeWalker()) {
+    if (typeof(e) == "language") {
+        if (typeof(e[[1]]) %in% c("symbol", "character")) {
+            h <- w$handler(as.character(e[[1]]), w)
+            if (! is.null(h)) h(e, w)
+            else w$call(e, w)
+        }
+        else w$call(e, w)
+    }
+    else w$leaf(e, w)
+}
+@ %def walkCode
+
+%**** %in% is very slow.  The expression here can be partially
+%**** evaluated because of the constant second arg.  The fact that
+%**** typeof always returns character can further simplify.  The
+%**** compiler should be able to use this info somehow.
+
+The default walker prints the leaves in a depth first traversal of the
+expression tree. 
+<<walkCode>>=
+makeCodeWalker <- function(...,
+                           handler = function (v, w) NULL,
+                           call = function(e, w)
+                               for (ee in as.list(e))
+                                   if (! missing(ee)) walkCode(ee, w),
+                           leaf = function(e, w) print(e))
+     list(handler = handler, call = call, leaf = leaf, ...)
+@ %def makeCodeWalker
+<<codetools exports>>=
+export(walkCode,makeCodeWalker)
+@ %def
+
+
+\section{Lisp-Style Tree Representation}
+This simple example uses the code walker to write out a Lisp-style
+representation of the parse tree.  This can be useful for
+understanding the way R parses some things.  Only the [[call]] and
+[[leaf]] fields of the walker are provided.  This example uses the
+walker only for side effects; the value returned is not useful.  The
+top level function allows an alternate output function to be provided.
+<<showTree>>=
+showTree <- function(e, write = cat) {
+    w <- makeCodeWalker(call = showTreeCall, leaf = showTreeLeaf,
+                        write = write)
+    walkCode(e, w)
+    w$write("\n")
+}
+@ %def showTree
+<<codetools exports>>=
+export(showTree)
+@ %def
+
+Calls are handled by writing out an opening parenthesis, recursively
+writing out the function and arguments, and ending with a closing
+parenthesis.  For missing arguments a reasonable representation is
+printed.
+<<showTree>>=
+showTreeCall <- function(e, w) {
+    w$write("(")
+    walkCode(e[[1]], w)
+    for (a in as.list(e[-1])) {
+        w$write(" ")
+	if (missing(a))
+	    w$write("<Missing>")
+	else
+            walkCode(a, w)
+    }
+    w$write(")")
+}
+@ %def showTreeCall
+
+Leaf nodes are symbols or constants.  Open parenthesis and open brace
+symbols are written between quotation marks to make the output more
+readable.
+<<showTree>>=
+showTreeLeaf <- function(e, w) {
+    if (typeof(e) == "symbol") {
+        if (e == "(") w$write("\"(\"")
+        else if (e == "{") w$write("\"{\"")
+        else w$write(e)
+    }
+    else w$write(deparse(e))
+}
+@ %def showTree
+
+<<test code>>=
+local({
+    st <- function(e) {
+        v <- NULL
+        write <- function(x)
+            v <<- paste(v, as.character(x), sep = "")
+        showTree(e, write = write)
+        v
+    }
+    assert(identical(st(quote(f(x))), "(f x)\n"))
+    assert(identical(st(quote((x+y)*z)), "(* (\"(\" (+ x y)) z)\n"))
+    assert(identical(st(quote(-3)), "(- 3)\n"))
+})
+@ %def
+
+\section{Call with Current Continuation}
+To terminate a code traversal it is useful to have a non-local exit
+mechanism.  A downward-only version of Scheme's call with current
+continuation is provided by
+<<callCC>>=
+if (! exists("callCC"))
+callCC <- function(fun) {
+    value <- NULL
+    delayedAssign("throw", return(value))
+    fun(function(v) { value <<- v; throw })
+}
+@ %def callCC
+As of R 2.5 [[callCC]] is included in the [base]] package.
+
+An alternate definition that uses only syntactic constructs, rather
+than explicit promise construction using [[delay]], needs a helper
+function:
+<<alternate callCC>>=
+makeThrower <- function(expr) function() expr
+@ %def makeThrower
+The result returned by [[makeThrower]] is a closure that captures the
+argument promise.  The promise is only evaluated when the closure is
+called.
+
+The exit function needs a thrower constructed with a [[return]]
+expression that returns the value of a variable [[value]] defined in
+the environment where the thrower is created.  The exit function takes
+the value to be returned as its argument, assings the value with a
+global assignment to [[value]], and then invokes the thrower closure.
+<<define callCC exit function>>=
+value <- NULL
+throwValue <- makeThrower(return(value))
+exit <- function(v) { value <<- v; throwValue() }
+@ %def
+The altrnate [[callCC]] definition is then
+<<alternate callCC>>=
+callCC <- function(fun) {
+    <<define callCC exit function>>
+    fun(exit)
+}
+@ %def callCC
+
+Another alternate version that uses an inlined version of
+[[makeThrower]] is
+<<another alternate callCC>>=
+callCC <- function(fun) {
+    value <- NULL
+    throwValue <- (function(expr) function() expr)(return(value))
+    exit <- function(v) { value <<- v; throwValue() }
+    fun(exit)
+}
+@ %def callCC
+
+<<callCC test code>>=
+assert(callCC(function(k) 1) == 1)
+assert(callCC(function(k) k(1)) == 1)
+assert(callCC(function(k) {k(1); 2}) == 1)
+@ %def
+
+\section{Warning and Error Messages}
+Brian suggests that uses of [[stop]] and [[warning]] should not show
+the call as this will be a call within [[codetools]] and so not useful
+to the user.  Here are versions of [[warning]] and [[stop]] with
+[[call.=FALSE]]:
+<<warning0 and stop0>>=
+warning0 <- function(msg) warning(msg, call.=FALSE)
+stop0 <- function(msg) stop(msg, call.=FALSE)
+@ %def warning0 stop0
+
+It would be better to make sure that everything related to the code
+being analyzed goes through a [[signal]] function and only problems in
+[[codetools]] itself result in explicit [[warning]] or [[stop]] calls
+-- then using the call context within [[codetools]] would make sense.
+
+
+\section{Constant Folding}
+Constant folding is an optimization in which calls to simple
+functions, such as basic numeric functions, involving explicit
+constants or variables representing global constants, such as [[pi]],
+are computed ahead of time rather than at run time.  Constant folding
+can be applied recursively to nested expressions.  For example, the
+expression
+\begin{verbatim}
+1 / sqrt(2 * pi)
+\end{verbatim}
+can be computed ahead of time as long as [[pi]] is known to refer to
+the variable [[pi]] defined in the base package.
+
+The code walker can be used as the basis for a constant folding
+function.  In this example the value returned by [[walkCode]] is a
+folded version of the original expression.  If folding is not possible
+a non-local exit will be taken.  An alternate approach in which some
+subexpressions are replaced by folded values but the entire expression
+cannot be reduced is more general and probably best described as
+partial evaluation.
+
+\subsection{Creating a Constant Folder}
+The constant folder adds five fields to the code walker.  The [[exit]]
+function is called at points where it is found that folding cannot
+continue; [[exit]] must therefore make a non-local exit from the code
+walk, i.e.\ it may not return normally.  [[isLocal]] is used to
+determine whether a shadowing local definition of a foldable global
+function exists.  [[foldable]] determines whether a function is to be
+considered foldable or not, and [[isConstant]] determines whether a
+value is to be considered a constant.  The function [[signal]] is used
+to handle any error that occurs when evaluating a constant expression.
+<<constantFold>>=
+makeConstantFolder <- function(...,
+                               leaf = foldLeaf,
+                               handler = function(v, w)
+                                   if (w$foldable(v, w)) foldCall,
+                               call = function(e, w) exitFolder(e, w),
+                               exit = function(e, w)
+                                  stop0(paste("not a foldable expression:",
+                                        deparse(e, width.cutoff = 500))),
+                               isLocal = function(v, w) FALSE,
+                               foldable = isFoldable,
+                               isConstant = isConstantValue,
+                               signal = function(e, msg, w) warning0(msg))
+     list(handler = handler, call = call, exit = exit, leaf = leaf,
+          isLocal = isLocal, foldable = isFoldable,
+          isConstant = isConstant, signal = signal, ...)
+
+exitFolder <- function(e, w) {
+    w$exit(e, w)
+    stop0("constant folding cannot continue")
+}
+@ %def makeConstantFolder exitFolder
+<<codetools exports>>=
+export(makeConstantFolder)
+@ %def
+
+\subsection{A Higher Level Interface}
+The constant folder used in the current experimental byte code
+compiler returns [[NULL]] if folding does not produce a constant
+result.  This means that folds that produce the constant [[NULL]] are
+ignored at present. It also uses a character vector to represent names
+of variables with local bindings.
+<<constantFold>>=
+constantFold <- function(e, env = NULL, fail = NULL) {
+    job <- function(exit) {
+        isLocal <- function(v, w) as.character(v) %in% env
+        doExit <- function(e, w) exit(fail)
+        w <- makeConstantFolder(isLocal = isLocal, exit = doExit)
+        walkCode(e, w)
+    }
+    callCC(job)
+}
+@ %def constantFold
+<<codetools exports>>=
+export(constantFold)
+@ %def
+
+One possible use is to return the original expression if folding
+fails.  It may also be useful to apply a size test to the results and
+only use consant folded results if the resulting object is not too
+large.
+
+<<test code>>=
+assert(identical(constantFold(quote(3)), 3))
+assert(identical(constantFold(quote(1+2)), 3))
+assert(identical(constantFold(quote(1+2+x)), NULL))
+assert(identical(constantFold(quote(pi)), pi))
+assert(identical(constantFold(quote(pi), "pi"), NULL))
+assert(identical(constantFold(quote(pi), "pi", FALSE), FALSE))
+@ %def
+
+An alternate interface allows the local bindings to be specified using
+environments.  This is used for constant folding the test in [[if]]
+expressions:
+<<constantFold>>=
+constantFoldEnv <- function(e, env = .GlobalEnv, fail = NULL) {
+    isLocal <- function(v, w) {
+        vname <- as.character(v)
+	while (! identical(env, .GlobalEnv)) {
+	    if (exists(vname, env, inherits = FALSE))
+		return(TRUE)
+	    env <- parent.env(env)
+	}
+	FALSE
+    }
+    job <- function(exit) {
+        doExit <- function(e, w) exit(fail)
+        w <- makeConstantFolder(isLocal = isLocal, exit = doExit)
+        walkCode(e, w)
+    }
+    tryCatch(callCC(job), error = function(e) fail)
+}
+@ %def constantFoldEnv
+
+\subsection{Default Constant Folder Methods}
+The default test for whether a value is considered a constant is
+<<old constantFold>>=
+isConstantValue <- function(v, w)
+    is.null(v) || (is.null(attributes(v)) && is.atomic(v))
+@ %def isConstantValue
+<<codetools exports>>=
+export(isConstantValue)
+@ %def
+
+Here is a modified version that allows the values of [[.Platform]] or
+[[.Machine]].  Maybe allowing arbitrary lists is OK but I'm a little
+nervous about that.
+<<constantFold>>=
+isConstantValue <- function(v, w)
+    is.null(v) ||
+    (is.null(attributes(v)) && is.atomic(v)) ||
+    (is.list(v) && (identical(v, .Platform) || identical(v, .Machine)))
+@ %def isConstantValue
+
+The default [[isFoldable]] test uses a list of names of foldable
+functions to determine which functions are considered foldable.
+<<constantFold>>=
+isFoldable <- function(v, w)
+    ((typeof(v) == "symbol" || typeof(v) == "character") &&
+     as.character(v) %in% foldFuns && ! w$isLocal(v, w))
+
+foldFuns <- c("+", "-", "*", "/", "^", "(",
+              ">", ">=", "==", "!=", "<", "<=", "||", "&&", "!",
+              "|", "&", "%%",
+              "sqrt", "log", "exp",
+              "c", "as.integer", "vector", "integer","numeric","character",
+              "rep",
+              ":",
+              "cos", "sin", "tan", "acos", "asin", "atan", "atan2",
+	      "is.R", "$", "[", "[[")
+@ %def isFoldable foldFuns
+
+Leaves that are variables may be replaced by the values of these
+variables if they correspond to global constants.  Otherwise, leaves
+must be constants to be foldable.
+<<constantFold>>=
+constNames <- c("pi", "T", "F", ".Platform", ".Machine")
+
+foldLeaf <- function(e, w) {
+    if (is.name(e) && as.character(e) %in% constNames && ! w$isLocal(e, w))
+        e <- get(as.character(e), envir = .BaseEnv)
+    if (! w$isConstant(e)) exitFolder(e, w)
+    e
+}
+@ %def constNames foldLeaf
+
+Finally, calls to foldable functions are folded by recursively
+attempting to fold all arguments and, if successful, attempting to
+evaluate the call.
+<<old constantFold>>=
+foldCall <- function(e, w) {
+    args <- lapply(e[-1], function(e) walkCode(e, w))
+    if (all(sapply(args, w$isConstant, w))) { # should be true
+        fname <- as.character(e[[1]])
+        msg <- try({ v <- do.call(fname, args); NULL }, silent = TRUE)
+        if (! is.null(msg)) {
+            w$signal(e, msg, w)
+            exitFolder(e, w)
+        }
+        else if (w$isConstant(v, w)) v
+        else exitFolder(e, w)
+    }
+    else exitFolder(e, w)
+}
+@ %def foldCall
+
+This modified version works for [[$]] also.
+<<constantFold>>=
+foldCall <- function(e, w) {
+    fname <- as.character(e[[1]])
+    if (fname == "$") {
+        args <- list(walkCode(e[[2]], w), e[[3]])
+        foldable <- w$isConstant(args[[1]], w)
+    }
+    else {
+        args <- lapply(e[-1], function(e) walkCode(e, w))
+        foldable <- all(sapply(args, w$isConstant, w))
+    }
+    if (foldable) {
+        msg <- try({ v <- do.call(fname, args); NULL }, silent = TRUE)
+        if (! is.null(msg)) {
+            w$signal(e, msg, w)
+            exitFolder(e, w)
+        }
+        else if (w$isConstant(v, w)) v
+        else exitFolder(e, w)
+    }
+    else exitFolder(e, w)
+}
+@ %def foldCall
+
+\subsection{Possible Extensions}
+Many more functions can be added to the list of foldable functions.
+If this is done then a more efficient represenation should be used.
+
+It would be possible to allow atomic values with names attributes to
+be considered constant values.
+
+It would in principle be possible to allow list structures and atomic
+values with non-[[NULL]] attributes to be considered constant values
+if all substructures were immutable constant values.
+
+It would be possible to constant fold expressions like
+<<more foldable expressions>>=
+if (TRUE) 1 else ...
+FALSE && ...
+TRUE || ...
+@ %def
+since in each case the expression represented by [[...]] is guaranteed
+not to be evaluated.  For now this is left to the compiler itself.
+
+Some of this has now been implemented for the test in [[if]]
+expressions.
+
+\section{Collect Local Variable Information}
+Most optimizations of compiled code will be based on special handling
+of calls to functions defined in base.  In order to justify these
+optimizations we need to be able to identify when a variable, in
+particular a variable in call position, represents a variable in base.
+For a variable reference in the body of a function defined within a
+name space, the variable will refer to a binding in base if
+\begin{itemize}
+\item The variable has a binding in base.
+\item The variable has no bindings in the name space itself or the imports.
+\item The variable has no local binding within the function or any
+  lexically enclosing function.
+\end{itemize}
+We therefore need to be able to determine the local variables that are
+defined at a point within a function body.
+
+Within a function the formal parameters are local variables.  In
+interpreted R code this may not be true, since the [[rm]] function can
+be used to remove variables.  So in
+<<example>>=
+function(x) {
+    rm(x)
+    x
+}
+@ %def
+the binding referred to by [[x]] in the second line of the body is a
+global binding since the local one for the parameter has been removed.
+As a result, parameters \emph{may} be local variables but are not
+guaranteed to be.
+
+There are two syntactic means for creating new local variable bindings
+within a function: assignment using [[<-]], [[->]], or [[=]], and a
+[[for]] loop.  Any symbol that appears as the assignment variable or
+the loop index will have a local binding after the assignment or loop
+are executed.  Since assignments may appear in conditional statements
+this also creates ambiguity: in
+<<example>>=
+function(x) {
+    if (x) y <- 1
+    y
+}
+@ %def
+whether the binding for [[y]] in the second line of the function is
+local or global depends on the value of [[x]].  Lazy evaluation also
+means that for assignments appearing in arguments to function calls we
+cannot be certain if or when the assignments are evaluated.  So once
+again we can only identify variables that \emph{may} be local.
+
+To summarize: by identifying all variables created by assignments and
+loops in a function body along with all parameters of a function we
+can identify all \emph{potential} local variables that are created by
+syntactic means.  If syntactic means were the only way to create local
+variables this would mean that any variable that is not potentially
+local is guaranteed to be global.
+
+However, interpreted R code has one more option for creating local
+variables: direct use of the [[assign]] function.  In
+<<example>>=
+function(x) {
+    assign(x, 1)
+    y
+}
+@ %def
+there is no way of knowing whether [[y]] is local or global---if [[x]]
+is [["y"]] then [[y]] is local; otherwise [[y]] is global.  Since this
+makes it impossible to identify all potential local variables we need
+to rule out this possibility.  For the moment we rule this out by
+convention; eventually the compiler will prevent assignment to
+variables that were not identified as potential local variables by
+syntactic analysis.
+
+One final point is that certain expressions create holes that block
+the creation of local variables within the current environment.  A
+[[function]] expression creates a new environment for its body, so
+assignments within a nested function do not add local variables to the
+environment of the outer expression.  Thus in
+<<example>>=
+f <- function(x)
+   g <- function(z) y <- z
+@ %def
+[[g]] is a local variable for [[f]], but [[y]] is not: [[y]] is a
+(useless) local variable for [[g]].  Similarly, assignments within
+simple [[local]] expressions, ones that do not specify an environment
+argument, create bindings that are only visible within the [[local]]
+expressions.  Thus in
+<<example>>=
+f <- function(x)
+   local(y <- x)
+   y
+}
+@ %def
+the reference to [[y]] in the second line of [[f]] is a global
+reference.
+
+Other functions that might be considered as blocking creation of local
+variables are the functions [[quote]], [[expression]], and [[~]] that
+quote their arguments.  Whether we consider assignments that occur
+within these functions as syntactically visible assignments or not is
+a matter of convention.  I will assume they are not.
+
+There are other functions that could be handled like [[local]].  One
+example is [[with]].  However, since [[with]] is a generic function
+there is some risk that a method may act in unexpected ways.  It is
+therefore best to treat assignments within [[with]] and other
+functions like it as potentially creating local variables.  This is
+conservative: it means some references to globals cannot be safely
+identified as such and therefore some optimizations will not be
+possible.
+
+So what we have now is a definition: Potentially local variables
+created within an expression are variables appearing on the left hand
+sides of assignment subexpressions or as loop variables in [[for]]
+loop subexpressions that are not contained in nested [[function]],
+simple [[local]], or quoting expressions.  Compiled code will
+eventually enforce the convention that assignments to variables that
+are not potentially local are not allowed in the evaluation frames of
+compiled functions.
+
+Given this definition of potentially local variables, we need a
+function that identifies all potentially local variables within an
+expression.  A first step is to identify variables on the left hand
+side of assignments.
+
+\subsection{Finding the Assigned Variable in Complex Assignments}
+The left hand sides of assignments can be symbols, strings, or complex
+expressions.  In a complex assignment the actual left hand side
+variable must be a symbol.  The following function extracts the name
+of the assigned variable from a possibly complex assignment
+expression.
+% **** allow overriding of the stop function
+<<getAssignedVar>>=
+getAssignedVar <- function(e) {
+    v <- e[[2]]
+    if (missing(v))
+        stop0(paste("bad assignment:", pasteExpr(e)))
+    else if (typeof(v) %in% c("symbol", "character"))
+        as.character(v)
+    else {
+        while (typeof(v) == "language") {
+            if (length(v) < 2)
+                stop0(paste("bad assignment:", pasteExpr(e)))
+            v <- v[[2]]
+            if (missing(v))
+                stop0(paste("bad assignment:", pasteExpr(e)))
+        }
+        if (typeof(v) != "symbol")
+            stop0(paste("bad assignment:", pasteExpr(e)))
+        as.character(v)
+    }
+}
+@ %def getAssignedVar
+<<codetools exports>>=
+export(getAssignedVar)
+@ %def
+An error is signaled if the assignment expression is badly formed.
+The expression in the error message is formatted by [[pasteExpr]]:
+<<utilities>>=
+pasteExpr <- function(e, prefix = "\n    ") {
+    de <- deparse(e)
+    if (length(de) == 1) sQuote(de)
+    else paste(prefix, deparse(e), collapse="")
+}
+@ %def pasteExpr
+It would probably be a good idea to truncate long output, both long
+lines and many lines.
+
+<<test code>>=
+assert(identical(getAssignedVar(quote("v"<-x)), "v"))
+assert(identical(getAssignedVar(quote(v<-x)), "v"))
+assert(identical(getAssignedVar(quote(f(v)<-x)), "v"))
+assert(identical(getAssignedVar(quote(f(g(v,2),1)<-x)), "v"))
+@ %def
+
+
+\subsection{Simple Implementations}
+The full code walker may be overkill for this problem, so we'll start
+with a simple recursive implementation:
+<<findlocals0>>=
+findLocals0 <- function(e) {
+    if (typeof(e) == "language") {
+        if (typeof(e[[1]]) %in% c("symbol", "character"))
+            switch(as.character(e[[1]]),
+                   "=" =,
+                   "<-" = unique(c(getAssignedVar(e),
+                                   findLocalsList0(e[-1]))),
+                   "for" = unique(c(as.character(e[2]),
+                                    findLocalsList0(e[-2]))),
+                   "function" = character(0),   
+                   "local" = if (length(e) == 2) character(0)
+                             else findLocalsList0(e[-1]),
+                   "expression" =,
+                   "Quote" =,
+                   "quote" =,
+                   "~" = character(0),
+                   findLocalsList0(e[-1]))
+         else findLocalsList0(e)
+    }
+    else character(0)
+}
+findLocalsList0 <- function(elist)
+    unique(unlist(lapply(elist, findLocals0)))
+@ %def findLocals0 findLocalsList0
+
+A problem with this simple implementation is that it assumes that all
+of the functions named in the [[switch]] correspond to the bindings in
+base.  This is reasonable for the ones that are syntactically special,
+but not for [[expression]], [[local]], and [[quote]].  These might be
+shadowed by local definitions in a surrounding function.  To allow for
+this we can add an optional variable [[locals]] for providing a
+character vector of names of variables with shadowing local
+definitions.
+<<findlocals1>>=
+findLocals1 <- function(e, locals = character(0)) {
+    if (typeof(e) == "language") {
+        if (typeof(e[[1]]) %in% c("symbol", "character"))
+            switch(as.character(e[[1]]),
+                   "=" =,
+                   "<-" = unique(c(getAssignedVar(e),
+                                   findLocalsList1(e[-1], locals))),
+                   "for" = unique(c(as.character(e[2]),
+                                    findLocalsList1(e[-2], locals))),
+                   "function" = character(0),   
+                   "local" = if (! "local" %in% locals &&  length(e) == 2)
+                                 character(0)
+                             else findLocalsList1(e[-1], locals),
+                   "expression" =,
+                   "Quote" =,
+                   "quote" = if (! as.character(e[[1]]) %in% locals)
+                                 character(0)
+                             else findLocalsList1(e[-1], locals),
+                   "~" = character(0),
+                   findLocalsList1(e[-1], locals))
+         else findLocalsList1(e, locals)
+    }
+    else character(0)
+}
+findLocalsList1 <- function(elist, locals)
+    unique(unlist(lapply(elist, findLocals1, locals)))
+@ %def findLocals1 findLocalsList1
+
+But what if assignments in the expression itself shadow one of
+[[expression]], [[local]], or [[quote]]?  For example, in
+<<example>>=
+function (f, x, y) {
+    local <- f
+    local(x <- y)
+    x
+}
+@ %def
+the reference to [[x]] in the third line has to be considered
+potentially local.  To deal with this we need multiple passes.  The
+first pass assumes that [[expression]], [[local]], or [[quote]] might
+be shadowed by local assignments.  If no assignments to some of them
+are visible, then a second pass can be used in which they are assumed
+not to be shadowed.  This can be iterated to convergence.  It is also
+useful to check before returning whether any of the syntactically
+special variables has been assigned to.  If so, then all bets are off,
+so a warning is issued.
+% **** allow overriding of the warning function
+<<findLocals2>>=
+findLocalsList2 <- function(elist, locals = character(0)) {
+    localStopFuns <- c("expression", "local", "quote", "Quote")
+    specialSyntaxFuns <- c("~", "<-", "=", "for", "function")
+    sf <- unique(c(locals, localStopFuns))
+    nsf <- length(sf)
+    repeat {
+        vals <- findLocalsList1(elist, sf)
+        isloc <- sf %in% vals
+        if (nsf == length(locals) || length(sf[isloc] == nsf)) {
+            rdsf <- vals %in% specialSyntaxFuns
+            if (any(rdsf))
+                warning0(paste("local assignments to syntactic functions:",
+                               vals[rdsf]))
+            return(vals)
+        }
+        else {
+            sf <- unique(c(locals, sf[isloc]))
+            nsf <- length(sf)
+        }
+    }
+}
+findLocals2 <- function(e, locals = character(0))
+    findLocalsList2(list(e), locals)
+@ %def findLocals2 findLocalsList2
+
+% **** think through false negatives. positives
+% **** use environment to build up info? Lazy eval is problem
+
+
+\subsection{Implementation Using the Code Walker}
+\subsubsection{Creating a Local Variable Collector}
+The code walker can be used to walk the code and call an accumulator
+function for each expression that creates a potential local variable.
+This allows various usage information to be collected, such as how
+often and in what context a variable is used or how often it is
+assigned to.
+<<findLocals>>=
+makeLocalsCollector <- function(...,
+                                leaf = function (e, w) character(0),
+                                handler = getCollectLocalsHandler,
+                                isLocal = function(v, w) FALSE,
+                                exit = function(e, msg, w) stop0(msg),
+                                collect = function(v, e, w) print(v))
+    makeCodeWalker(leaf = leaf, handler = handler, collect = collect,
+                   isLocal = isLocal, exit = exit)
+@ %def makeLocalsCollector
+<<codetools exports>>=
+export(makeLocalsCollector)
+@ %def
+A simple interface is provided by
+<<findLocals>>=
+collectLocals <- function(e, collect) {
+    w <- makeLocalsCollector(collect = collect)
+    walkCode(e, w)
+}
+@ %def collectLocals
+<<codetools exports>>=
+export(collectLocals)
+@ %def
+
+The handlers for particular global functions are returned by
+<<findLocals>>=
+getCollectLocalsHandler <- function(v, w) {
+    switch(v,
+           "=" =,
+           "<-" = collectLocalsAssignHandler,
+           "for" = collectLocalsForHandler,
+           "function" =,
+           "~" = function(e, w) character(0),
+           "local" = if (! w$isLocal(v, w))
+               collectLocalsLocalHandler,
+           ## **** could add handler for bquote() here that looks at the .()'s,
+           ## **** ..(), and extra args, but creating locals there is not very
+           ## **** sensible, so handle like quote() for now.
+           "bquote" =,
+           "expression" =,
+           "Quote" =,
+           "quote" = if (! w$isLocal(v, w))
+               function(e, w) character(0),
+           "delayedAssign" =,
+           "assign" = function(e, w)
+               if (length(e) == 3 && is.character(e[[2]]) &&
+                   length(e[[2]]) == 1) {
+                   w$collect(e[[2]], e, w)
+                   walkCode(e[[3]], w)
+               }
+               else for (a in dropMissings(e[-1])) walkCode(a, w))
+}
+@ %def getCollectLocalsHandler
+This definition also allows for the possibility that someone might
+create a local variable by calling [[assign]] with two arguments and
+an explicit string as the first argument.  At the time of writing
+[[nlme]] does this for some reason.  Analogous uses of [[delayedAssign]]
+are handled as well.
+%**** more discussion of this case
+%**** is a warning appropriate??
+
+A utility function is needed here and elsewhere to remove the missing
+values from the formals of a function or from a function call.  One
+way to define this function is
+<<findLocals>>=
+dropMissings <- function(x) {
+    lx <- as.list(x)
+    ix <- rep(TRUE, length(x))
+    for (i in seq_along(ix)) {
+        a <- lx[[i]]
+        if (missing(a)) ix[i] <- FALSE
+    }
+    lx[ix]
+}
+@ %def dropMissings
+
+New local variables are created by left assignments operators [[<-]]
+and [[=]] and by [[for]] loops.  Right assignments using [[->]] are
+converted to left assignments by the parser.  All of these functions
+are syntactically special, so I will not worry about the possibility
+of local shadowing, except to check and issue a warning at the end of
+the higher level interface.
+% **** if these are shadowed then maybe they do not create locals; this
+% **** should be OK since we can often not be sure a variable is created.
+% **** pass custom exit handler to getAssignedVar once supported
+<<findLocals>>=
+collectLocalsAssignHandler <- function(e, w) {
+    w$collect(getAssignedVar(e), e, w)
+    walkCode(e[[2]], w)
+    walkCode(e[[3]], w)
+}
+
+collectLocalsForHandler <- function(e, w) {
+    signal <- function(msg) w$exit(e, msg, w)
+    w$collect(as.character(checkSymOrString(e[[2]], signal)), e, w)
+    walkCode(e[[3]], w)
+    walkCode(e[[4]], w)
+}
+
+checkSymOrString <- function(e, signal = stop) {
+    type <- typeof(e)
+    if (type == "symbol" || type == "character") e
+    else signal("not a symbol or string")
+}
+@ %def collectLocalsAssignHandler collectLocalsForHandler checkSymOrString
+
+The functions [[~]], [[expression]], and [[quote]] do not evaluate
+their arguments, so any assignment expressions they contain should not
+be considered to create new local variables.  [[function]] starts a
+new local context, so any assignments in its body are not relevant.
+Their handlers are functions that simply return [[character(0)]].
+
+Simple calls to [[local]], i.e. ones without an environment argument,
+create local bindings in a child environment, so assignments made
+there will not affect the environment of the expression containing the
+[[local]] call.  If an environment is provided then it could be the
+calling environment, and so assignments are counted as creating
+potential local variables.
+<<findLocals>>=
+collectLocalsLocalHandler <- function(e, w) {
+    if (length(e) == 2) # no explicit env
+        character(0)
+    else for (a in dropMissings(e[-1])) walkCode(a, w)
+}
+@ %def collectLocalsLocalHandler
+
+\subsubsection{Higher Level Interface}
+A simple interface that assumes [[expression]], [[local]], and
+[[quote]] are global:
+<<findLocals-old>>=
+findLocals <- function(e) {
+    env <- new.env(hash = TRUE, parent = NULL)
+    collect <- function(v, e, w) assign(v, TRUE, envir = env)
+    collectLocals(e, collect)
+    ls(env, all = TRUE)
+}
+@ %def findLocals
+
+The more sophisticated version is defined in terms of
+[[findLocalsList]] which operates on a list of expressions.  For
+finding the local variables in a function this list will be the
+function body along with the default argument expressions.  In
+addition, this version allows an environment to be given instead of a
+character vector of masked names.  If an environment is specified, then
+the environment is checked to see whether any [[expression]],
+[[local]], or [[quote]] are masked by a non-base binding.
+<<findLocals>>=
+findLocalsList <- function(elist, envir = .BaseEnv) {
+    localStopFuns <- c("expression", "quote", "Quote", "local")
+    if (is.character(envir))
+        locals <- envir
+    else
+        locals <- localStopFuns[! sapply(localStopFuns,isBaseVar, envir)]
+    specialSyntaxFuns <- c("~", "<-", "=", "for", "function")
+    sf <- unique(c(locals, localStopFuns))
+    nsf <- length(sf)
+    collect <- function(v, e, w) assign(v, TRUE, envir = env)
+    isLocal <- function(v, w) as.character(v) %in% sf
+    w <- makeLocalsCollector(collect = collect, isLocal = isLocal)
+    repeat {
+        env <- mkHash()
+        for (e in elist) walkCode(e, w)
+        isloc <- sapply(sf, exists, envir = env, inherits = FALSE)
+	last.nsf <- nsf
+        sf <- unique(c(locals, sf[isloc]))
+        nsf <- length(sf)
+        if (last.nsf == nsf) {
+            vals <- ls(env, all.names = TRUE)
+            rdsf <- vals %in% specialSyntaxFuns
+            if (any(rdsf))
+                warning0(paste("local assignments to syntactic functions:",
+                               vals[rdsf]))
+            return(vals)
+        }
+    }
+}
+
+findLocals <- function(e, envir = .BaseEnv)
+    findLocalsList(list(e), envir)
+@ %def findLocals findLocalsList
+<<codetools exports>>=
+export(findLocals,findLocalsList)
+@ %def
+
+Two utility functions are needed to handle the case where an
+environment is given.  The first function searches an environment for
+the first frame that contains a binding for a specified variable
+name. The search can be stopped at a particular frame and a default
+return expression can be provided.  With lazy evaluation the default
+expression can signal an error.
+<<findLocals>>=
+findOwnerEnv <- function(v, env, stop = NA, default = NA) {
+    while (! identical(env, stop))
+        if (exists(v, envir = env, inherits = FALSE))
+            return(env)
+        else if (is.emptyenv(env))
+            return(default)
+        else env <- parent.env(env)
+    default
+}
+@ %def findOwnerEnv
+The second utility function determines whether the first visible
+binding for a variable is a binding in base.
+<<findLocals old>>=
+isBaseVar<-function(v, env) {
+    e<-findOwnerEnv(v, env)
+    is.null(e) || identical(e, .BaseNamespaceEnv)
+}
+@ %def isBaseVar
+A safer approach would be to consider a definition to be in base only
+if it is found via a name space. Eventually this additional safety
+should be made an option.
+%**** use dynamic variable to control whether name spaces are used here??
+
+A problem comes up if [[@<-]] is used since it is defined in the
+[[methods]] package.  A dirty little temporary workaround:
+<<findLocals-bad>>=
+isBaseVar <- function (v, env) {
+    e <- findOwnerEnv(v, env)
+    is.null(e) || identical(e, .BaseNamespaceEnv) ||
+    (v == "@<-" && identical(e, as.environment("package:methods")))
+}
+@ %def isBaseVar
+Except this isn't right: it fails if methods is imported.  Better for
+now just to take the chance that someone might redefine[[@<-]]:
+<<findLocals>>=
+isBaseVar <- function (v, env) {
+    e <- findOwnerEnv(v, env)
+    is.baseenv(e) || identical(e, .BaseNamespaceEnv) || v == "@<-"
+}
+@ %def isBaseVar
+
+<<test code>>=
+assert(identical(findLocals(quote(x<-1)), "x"))
+assert(identical(findLocals(quote(f(x)<-1)), "x"))
+assert(identical(findLocals(quote(f(g(x,2),1)<-1)), "x"))
+assert(identical(findLocals(quote(x<-y<-1)), c("x","y")))
+assert(identical(findLocals(quote(local(x<-1,e))), "x"))
+assert(identical(findLocals(quote(local(x<-1))), character(0)))
+assert(identical(findLocals(quote({local<-1;local(x<-1)})), c("local", "x")))
+assert(identical(findLocals(quote(local(x<-1,e)), "local"), "x"))
+local({
+    f <- function (f, x, y) {
+        local <- f
+        local(x <- y)
+        x
+    }
+    assert(identical(findLocals(body(f)), c("local","x")))
+})
+local({
+    env <- new.env()
+    assign("local", 1, env)
+    assert(identical(findLocals(quote(local(x<-1,e)), env), "x"))
+})
+assert(identical(findLocals(quote(assign(x, 3))), character(0)))
+assert(identical(findLocals(quote(assign("x", 3))), "x"))
+assert(identical(findLocals(quote(assign("x", 3, 4))), character(0)))
+@ %def
+
+<<test function>>=
+testFindLocals <- function(env) {
+    fl <- get("findLocals", "package:compiler")
+    for (n in ls(env, all = TRUE)) {
+        v <- get(n, env, inherits = FALSE)
+        if (typeof(v) == "closure") {
+            b <- body(v)
+            loc1 <- sort(as.character(fl(b)))
+            loc2 <- sort(codetools::findLocals(b))
+            if (! identical(loc1, loc2))
+                browser()
+        }
+    }
+}
+@ %def testFindLocals
+
+The potential local variables created within a function consist of the
+local variables created within the function body or any of the default
+argument expressions.  Assignments in default argument expressions are
+rare, and probably not a good idea, but they are legal.
+<<findLocals>>=
+findFuncLocals <- function(formals, body)
+   findLocalsList(c(list(body), dropMissings(formals)))
+@ %def findFuncLocals
+<<codetools exports>>=
+export(findFuncLocals)
+@ %def
+
+<<test code>>=
+local({
+    f<-function() { x <- 1; y <- 2}
+    assert(identical(sort(findFuncLocals(formals(f),body(f))), c("x","y")))
+    f<-function(u = x <- 1) y <- 2
+    assert(identical(sort(findFuncLocals(formals(f),body(f))), c("x","y")))
+})
+@ %def
+
+\section{Flattening Complex Assignments}
+Evaluating a complex assignment involves a number of steps.
+For the expression
+\begin{verbatim}
+f(g(x, 2), 1) <- y
+\end{verbatim}
+the steps are roughly
+\begin{verbatim}
+`*tmpv*` <- y
+x <- x
+`*tmp*` <- g(x, 2)
+`*tmpv*` <- "f<-"(`*tmp*`, 1, value = `*tmpv*`)
+"g<="(x, 2, value = `*tmpv*`)
+\end{verbatim}
+The first step computes and saves the right hand side value.  The
+second step insures that [[x]] is a local variable.  The third step
+computes and saves the inner component of the left hand side.  Then
+the actual assignments calls are performed.
+
+The function [[flattenAssignment]] takes the left hand side of an
+assignment and returns the expressions that need to be evaluated as a
+list of two components.  The first component is a list of the
+expressions that need to be evaluated to find the sequence of left
+hand values to be modified.  The first element of this list will be
+the variable symbol itself.  The second list is the sequence of calls
+to assignment functions.  The expresions use two temporary variables,
+[[*tmp*]] and [[*tmpv*]].  The interpreter only needs [[*tmp*]]; the
+compiler may be able to avoid using either.  For the example of the
+previous paragraph the result is
+\begin{verbatim}
+> flattenAssignment(quote(f(g(x, 2), 1)))
+@[[1]]
+@[[1]]@[[1]]
+x
+
+@[[1]]@[[2]]
+g(`*tmp*`, 2)
+
+
+@[[2]]
+@[[2]]@[[1]]
+"f<-"(`*tmp*`, 1, value = `*tmpv*`)
+
+@[[2]]@[[2]]
+"g<-"(x, 2, value = `*tmpv*`)
+\end{verbatim}
+
+The implementation is analogous to the interpreter implementation of
+complex assignment.  The function [[evalseq]] returns the sequence of
+expressions used to extract the left hand side components:
+<<flattenAssignment>>=
+evalseq <- function(e) {
+    if (typeof(e) == "language") {
+        v <- evalseq(e[[2]])
+        e[[2]] <- as.name("*tmp*")
+        c(v, list(e))
+    }
+    else list(e)
+}
+@ %def evalseq
+
+The function [[apdef]], analogous to the internal [[applydefine]]
+function in [[eval.c]], constructs the sequence of assignment function
+calls.
+<<flattenAssignment>>=
+apdef <- function(e) {
+    v <- NULL
+    tmp <- as.name("*tmp*")
+    tmpv <- as.name("*tmpv*")
+    while (typeof(e) == "language") {
+        ef <- e
+        ef[[1]] <- makeAssgnFcn(e[[1]])
+        if (typeof(ef[[2]]) == "language")
+            ef[[2]] <- tmp
+        ef$value <- tmpv
+        v <- c(v, list(ef))
+        e <- e[[2]]
+    }
+    v
+}
+@ %def apdef
+The function [[makeAssgnFcn]] creates the assignment function. usually
+[[fun]] is a symbol and the assignment function is [[fun]] with [[<-]]
+appended to it, but as of R 2.13.0 (r53754) we also allow assignments
+of the form [[foo::bar(x) <- y]].
+<<flattenAssignment>>=
+makeAssgnFcn <- function(fun) {
+    if (typeof(fun) == "symbol")
+        as.name(paste0(as.character(fun), "<-"))
+    else {
+        if (getRversion() >= "2.13.0" &&
+	    typeof(fun) == "language" && typeof(fun[[1]]) == "symbol" &&
+	    as.character(fun[[1]]) %in% c("::", ":::") &&
+	    length(fun) == 3 && typeof(fun[[3]]) == "symbol") {
+	    fun[[3]] <- as.name(paste0(as.character(fun[[3]]), "<-"))
+            fun
+	}
+	else
+	    stop(sQuote(deparse(fun)),
+	         " is not a valid function in complex assignments")
+   }
+}
+@ %def makeAssgnFcn
+
+The external interface is [[flattenAssignment]].
+<<flattenAssignment>>=
+flattenAssignment <- function(e) {
+    if (typeof(e) == "language")
+        list(evalseq(e[[2]]), apdef(e))
+    else list(NULL, NULL)
+}
+@ %def flattenAssignment
+<<codetools exports>>=
+export(flattenAssignment)
+@ %def
+
+<<test code>>=
+assert(identical(flattenAssignment(quote(x)), list(NULL, NULL)))
+assert(identical(flattenAssignment(quote(f(x, 1))),
+                 list(list(quote(x)),
+                      list(quote("f<-"(x, 1, value = `*tmpv*`))))))
+assert(identical(flattenAssignment(quote(f(g(x, 2), 1))),
+                 list(list(quote(x), quote(g(`*tmp*`, 2))),
+                     list(quote("f<-"(`*tmp*`, 1, value = `*tmpv*`)),
+                          quote("g<-"(x, 2, value = `*tmpv*`))))))
+assert(identical(flattenAssignment(quote(f(g(h(x, 3), 2), 1))),
+                 list(list(quote(x),
+                           quote(h(`*tmp*`, 3)),
+                           quote(g(`*tmp*`, 2))),
+                     list(quote("f<-"(`*tmp*`, 1, value = `*tmpv*`)),
+                          quote("g<-"(`*tmp*`, 2, value = `*tmpv*`)),
+                          quote("h<-"(x, 3, value = `*tmpv*`))))))
+assert(identical(flattenAssignment(quote(f(g(h(k(x, 4), 3), 2), 1))),
+                 list(list(quote(x),
+                           quote(k(`*tmp*`, 4)),
+                           quote(h(`*tmp*`, 3)),
+                           quote(g(`*tmp*`, 2))),
+                     list(quote("f<-"(`*tmp*`, 1, value = `*tmpv*`)),
+                          quote("g<-"(`*tmp*`, 2, value = `*tmpv*`)),
+                          quote("h<-"(`*tmp*`, 3, value = `*tmpv*`)),
+                          quote("k<-"(x, 4, value = `*tmpv*`))))))
+if (getRversion() >= "2.13.0")
+    assert(identical(flattenAssignment(quote(base::diag(x))),
+                     list(list(quote(x)),
+		          list(quote(base::`diag<-`(x, value = `*tmpv*`))))))
+@ %def
+
+Some issues:
+\begin{itemize}
+\item **** try to add local vars one expression at a time in [[{}]] sequences
+\item **** handle branches of [[if]] separately, etc.
+\item **** warn if [[assign(x,y)]] (i.e. no env) used.
+\item **** add locals argument for local masking
+\item **** use locals argument of findLocalsList
+\item **** optional control over [[with]], maybe others?
+\end{itemize}
+
+\section{Collecting Information on Function and Variable Usage}
+
+\subsection{Creating a Usage Collector}
+<<collectUsage>>=
+makeUsageCollector <- function(fun, ..., name = NULL,
+                               enterLocal = doNothing,
+                               enterGlobal = doNothing,
+                               enterInternal = doNothing,
+                               startCollectLocals = doNothing,
+                               finishCollectLocals = doNothing,
+                               warn = warning0,
+                               signal = signalUsageIssue) {
+    if (typeof(fun) == "closure")
+        env <- environment(fun)
+    else
+        env <- .GlobalEnv
+    makeCodeWalker(..., name = name,
+                   enterLocal = enterLocal,
+                   enterGlobal = enterGlobal,
+                   enterInternal = enterInternal,
+                   startCollectLocals = startCollectLocals,
+                   finishCollectLocals = finishCollectLocals,
+                   warn = warn,
+                   signal = signal,
+                   leaf = collectUsageLeaf,
+                   call = collectUsageCall,
+                   handler = getCollectUsageHandler,
+                   globalenv = env,
+                   env = env,
+                   name = NULL,
+                   srcfile = NULL,
+                   frow = NULL,
+                   lrow = NULL,
+                   isLocal = collectUsageIsLocal)
+}
+
+collectUsage <- function(fun, name = "<anonymous>", ...) {
+    w <- makeUsageCollector(fun, ...)
+    collectUsageFun(name, formals(fun), body(fun), w)
+}
+@ %def
+<<codetools exports>>=
+export(makeUsageCollector,collectUsage)
+@ %def
+
+<<collectUsage>>=
+collectUsageLeaf  <- function(v, w) {
+    if (typeof(v) == "symbol") {
+        vn <- as.character(v)
+        if (v == "...")
+            w$signal("... may be used in an incorrect context", w)
+        else if (isDDSym(v)) {
+            if (w$isLocal("...", w))
+                w$enterLocal("variable", "...", v, w)
+            else
+                w$signal(paste(v, "may be used in an incorrect context"), w)
+        }
+        else if (w$isLocal(vn, w))
+            w$enterLocal("variable", vn, v, w)
+        else if (! vn %in% c("*tmp*", "*tmpv*"))
+            w$enterGlobal("variable", vn, v, w)
+    }
+}
+
+collectUsageArgs <- function(e, w) {
+    for (a in dropMissings(e[-1]))
+        if (typeof(a) == "symbol" && a == "...") {
+            if (w$isLocal("...", w))
+                w$enterLocal("variable", "...", a, w)
+            else
+                w$signal(paste(a, "may be used in an incorrect context:",
+                               pasteExpr(e)), w)
+        }
+        else walkCode(a, w)
+}
+
+collectUsageCall <- function(e, w) {
+    if (typeof(e[[1]]) %in% c("symbol", "character")) {
+        fn <- as.character(e[[1]])
+        if (w$isLocal(fn, w))
+            w$enterLocal("function", fn, e, w)
+        else w$enterGlobal("function", fn, e, w)
+    }
+    else walkCode(e[[1]], w)
+    collectUsageArgs(e, w)
+}
+
+collectUsageFun <- function(name, formals, body, w) {
+    w$name <- c(w$name, name)
+    parnames <- names(formals)
+    locals <- findFuncLocals(formals, body)
+    w$env <- new.env(hash = TRUE, parent = w$env)
+    for (n in c(parnames, locals))
+        assign(n, TRUE, w$env)
+    w$startCollectLocals(parnames, locals, w)
+    for (a in dropMissings(formals)) walkCode(a, w)
+    walkCode(body, w)
+    w$finishCollectLocals(w)
+}
+
+signalUsageIssue <- function(m, w) {
+    if (!is.null(w$frow) && !is.na(w$frow)) {
+        fname <- w$srcfile
+        if (w$frow == w$lrow)
+            loc <- paste(" (", fname, ":",  w$frow, ")", sep = "")
+        else loc <- paste(" (", fname, ":", w$frow, "-", w$lrow, ")", sep = "")
+    }
+    else loc <- NULL
+
+    w$warn(paste(paste(w$name, collapse = " : "), ": ", m, loc, "\n", sep = ""))
+}
+
+# **** is this the right handling of ..n things?
+# **** signal (possible) error if used in wrong context?
+# **** also need error for ... when not present
+# **** maybe better done in leaf?
+collectUsageIsLocal <- function(v, w) {
+    if (isDDSym(v)) v <- "..."
+    ! is.baseenv(findOwnerEnv(v, w$env, stop = w$globalenv,
+                              default = .BaseEnv))
+}
+
+doNothing <- function(...) NULL
+@ @def
+
+\subsection{Usage Collectors for Some Base Functions}
+In [[getCollectUsageHandler]] the function [[Quote]] needs to be
+handled specialy since it is defined in the [[methods]] package but is
+a primitive.
+<<collectUsage>>=
+
+##
+## Usage collectors for some standard functions
+##
+
+collectUsageHandlers <- mkHash()
+
+# 'where' is ignored for now
+addCollectUsageHandler <- function(v, where, fun)
+    assign(v, fun, envir = collectUsageHandlers)
+
+getCollectUsageHandler <- function(v, w)
+    if (exists(v, envir = collectUsageHandlers, inherits = FALSE) &&
+        (isBaseVar(v, w$env) ||
+         isStatsVar(v, w$env) || isUtilsVar(v, w$env) || # **** for now
+	 v == "Quote" ))  # **** yet another glorious hack!!!
+        get(v, envir = collectUsageHandlers)
+##**** this is (yet another) temporary hack
+isStatsVar <- function(v, env) {
+    e <- findOwnerEnv(v, env)
+    if (! identical(e, NA) &&
+        exists(v, envir = e, inherits = FALSE, mode = "function")) {
+        f <- get(v, envir = e, inherits = FALSE, mode = "function")
+        identical(environment(f), getNamespace("stats"))
+    }
+    else FALSE
+}
+isUtilsVar <- function(v, env) {
+    e <- findOwnerEnv(v, env)
+    if (! identical(e, NA) &&
+        exists(v, envir = e, inherits = FALSE, mode = "function")) {
+        f <- get(v, envir = e, inherits = FALSE, mode = "function")
+        identical(environment(f), getNamespace("utils"))
+    }
+    else FALSE
+}
+
+isSimpleFunDef <- function(e, w)
+    typeof(e[[2]]) != "language" && typeof(e[[3]]) == "language" &&
+    typeof(e[[3]][[1]]) %in% c("symbol", "character") &&
+    e[[3]][[1]] == "function" && isBaseVar("function", w$env)
+
+isClosureFunDef <- function(e, w)
+    typeof(e[[2]]) != "language" && typeof(e[[3]]) == "closure"
+
+checkDotsAssignVar <- function(v, w) {
+    if (v == "...") {
+        w$signal("... may be used in an incorrect context", w)
+        FALSE
+    }
+    else if (isDDSym(v)) {
+        w$signal(paste(v, "may be used in an incorrect context"), w)
+        FALSE
+    }
+    else TRUE
+}
+
+#**** proceeds even if "..." or "..1", etc--is that right?
+local({
+    h <- function(e, w) {
+        w$enterGlobal("function", as.character(e[[1]]), e, w)
+        v <- getAssignedVar(e)
+        checkDotsAssignVar(v, w)
+        w$enterLocal("<-", v, e, w)
+        if (isSimpleFunDef(e, w))
+            collectUsageFun(v, e[[3]][[2]], e[[3]][[3]], w)
+        else if (isClosureFunDef(e, w)) { ## to handle inlined S4 methods
+            fun <- e[[3]]
+            w$globalenv <- environment(fun)
+            w$env = environment(fun)
+            collectUsageFun(v, formals(fun), body(fun), w)
+        }            
+        else {
+            if (typeof(e[[2]]) == "language") {
+                fa <- flattenAssignment(e[[2]])
+                for (a in fa)
+                    for (b in a) walkCode(b, w)
+            }
+            walkCode(e[[3]], w)
+        }
+    }
+    addCollectUsageHandler("<-", "base", h)
+    addCollectUsageHandler("=", "base", h)
+})
+
+#**** would be better to use match.call in most of these
+#**** proceeds even if "..." or "..1", etc--is that right?
+addCollectUsageHandler("<<-", "base", function(e, w) {
+    w$enterGlobal("function", "<<-", e, w)
+    v <- getAssignedVar(e)
+    checkDotsAssignVar(v, w)
+    if (w$isLocal(v, w))
+        w$enterLocal("<<-", v, e, w)
+    else w$enterGlobal("<<-", v, e, w)
+    if (typeof(e[[2]]) == "language") {
+        fa <- flattenAssignment(e[[2]])
+        for (a in fa)
+            for (b in a) walkCode(b, w)
+    }
+    walkCode(e[[3]], w)
+})
+
+addCollectUsageHandler("for", "base", function(e, w) {
+    w$enterGlobal("function", "for", e, w)
+    v <- as.character(e[[2]])
+    w$enterLocal("for", v, e, w)
+    walkCode(e[[3]], w)
+    walkCode(e[[4]], w)
+})
+
+addCollectUsageHandler("{", "base", function(e, w) {
+    w$enterGlobal("function", "{", e, w)
+    w$srcfile <- attr(e, "srcfile")$filename
+    
+    if (length(e)>1){
+        for ( i in 2 : length(e)){      
+            if ( !is.null(attr(e, "srcref")[[i]])){
+                w$frow <- attr(e, "srcref")[[i]][[1]]
+                w$lrow <- attr(e, "srcref")[[i]][[3]]
+            }
+            walkCode(e[[i]], w)
+        }
+    }
+})
+
+#**** is this the right way to handle :: and ::: ??
+#**** maybe record package/name space?
+local({
+    h <- function(e, w)
+        w$enterGlobal("function", as.character(e[[1]]), e, w)
+    addCollectUsageHandler("~", "base", h)
+    addCollectUsageHandler("quote", "base", h)
+    addCollectUsageHandler("Quote", "methods", h)
+    addCollectUsageHandler("expression", "base", h)
+    addCollectUsageHandler("::", "base", h)
+    addCollectUsageHandler(":::", "base", h)
+})
+
+#**** add counter to anonymous functions to distinguish??
+addCollectUsageHandler("function", "base", function(e, w)
+    collectUsageFun("<anonymous>", e[[2]], e[[3]], w))
+
+addCollectUsageHandler("local", "base", function(e, w) {
+    w$enterGlobal("function", "local", e, w)
+    if (length(e) == 2)
+        collectUsageFun("<local>", NULL, e[[2]], w)
+    else collectUsageArgs(e, w)
+})
+
+addCollectUsageHandler("assign", "base", function(e, w) {
+    w$enterGlobal("function", "assign", e, w)
+    if (length(e) == 3 && is.character(e[[2]]) && length(e[[2]]) == 1) {
+        w$enterLocal("<-", e[[2]], e, w)
+        walkCode(e[[3]], w)
+    }
+    else collectUsageArgs(e, w)
+})
+
+addCollectUsageHandler("with", "base", function(e, w) {
+    w$enterGlobal("function", "with", e, w)
+    if (identical(w$skipWith, TRUE))
+        walkCode(e[[2]], w)
+    else collectUsageArgs(e, w)
+})
+
+local({
+    h <- function(e, w) {
+        w$enterGlobal("function", as.character(e[[1]]), e, w)
+        walkCode(e[[2]], w)
+    }
+    addCollectUsageHandler("$", "base", h)
+    addCollectUsageHandler("@", "base", h)
+})
+
+local({
+    h <- function(e, w) {
+        w$enterGlobal("function", as.character(e[[1]]), e, w)
+        walkCode(e[[2]], w)
+        walkCode(e[[4]], w)
+    }
+    addCollectUsageHandler("$<-", "base", h)
+    addCollectUsageHandler("@<-", "base", h)
+})
+
+addCollectUsageHandler(".Internal", "base", function(e, w) {
+    w$enterGlobal("function", ".Internal", e, w)
+    if (length(e) != 2)
+        w$signal(paste("wrong number of arguments to '.Internal':",
+                       pasteExpr(e)), w)
+    else if (typeof(e[[2]]) == "language") {
+        w$enterInternal(e[[2]][[1]], e[[2]], w)
+        collectUsageArgs(e[[2]], w)
+    }
+    else w$signal(paste("bad argument to '.Internal':", pasteExpr(e[[2]])), w)
+})
+
+addCollectUsageHandler("substitute", "base", function(e, w) {
+    w$enterGlobal("function", "substitute", e, w)
+    if (length(e) > 3)
+        w$signal("wrong number of arguments to 'substitute'", w)
+    if (length(e) == 3) {
+        a <- e[[3]]
+        if (! missing(a)) walkCode(a, w)
+    }
+})
+
+addCollectUsageHandler("bquote", "base", function(e, w) {
+    w$enterGlobal("function", "bquote", e, w)
+    if (! anyDots(e)) {
+        e <- tryCatch(match.call(base::bquote, e), error = function(e) NULL)
+	if (! is.null(e)) {
+	    ## create a new handler that only handles .() and ..() and checks
+	    ## for usage there (from Dirk Schumacher)
+	    wNew <- w
+	    wNew$leaf <- function(e, w) NULL
+	    wNew$handler <- function(v, wL) {
+                if (v == "." || v == "..") {
+                    function(e, wL2) {
+                        e2 <- e[[2]]
+                        e2_type <- typeof(e2)
+                        if (e2_type  == "symbol")
+                            collectUsageLeaf(e2, w)
+                        else if (e2_type == "language")
+                            collectUsageCall(e2, w)
+                    }
+                }
+            }
+            walkCode(e[[2]], wNew)
+            ## check usage in any additional arguments
+	    for (a in as.list(e)[-(1 : 2)])
+                walkCode(a, w)
+        }
+    }
+})
+addCollectUsageHandler("library", "base", function(e, w) {
+    w$enterGlobal("function", "library", e, w)
+    if (length(e) > 2)
+        for(a in dropMissings(e[-(1:2)])) walkCode(a, w)
+})
+addCollectUsageHandler("require", "base", function(e, w) {
+    w$enterGlobal("function", "require", e, w)
+    if (length(e) > 2)
+        for(a in dropMissings(e[-(1:2)])) walkCode(a, w)
+})
+addCollectUsageHandler("data", "utils", function(e, w) {
+    w$enterGlobal("function", "data", e, w)
+})
+mkLinkHandler <- function(family, okLinks) {
+    function(e, w) {
+        w$enterGlobal("function", family, e, w)
+        if (length(e) >= 2) {
+            if (is.character(e[[2]])) {
+                if (! (e[[2]] %in% okLinks))
+                    w$signal(paste("link", sQuote(e[[2]]), "not available for",
+                                   sQuote(family)), w)
+            }
+            else if (! is.name(e[[2]]) || ! as.character(e[[2]]) %in% okLinks)
+                walkCode(e[[2]], w)
+        }
+    }
+}
+addCollectUsageHandler("detach", "base", function(e, w) {
+    w$enterGlobal("function", "detach", e, w)
+    if (length(e) > 2)
+        for(a in dropMissings(e[-(1:2)])) walkCode(a, w)
+})
+addCollectUsageHandler("binomial", "stats",
+                       mkLinkHandler("binomial",
+                                     c("logit", "probit", "cloglog",
+                                       "cauchit", "log")))
+addCollectUsageHandler("gaussian", "stats",
+                       mkLinkHandler("gaussian",
+                                     c("inverse", "log", "identity")))
+addCollectUsageHandler("Gamma", "stats",
+                       mkLinkHandler("Gamma",
+                                     c("inverse", "log", "identity")))
+addCollectUsageHandler("poisson", "stats",
+                       mkLinkHandler("poisson",
+                                     c("log", "identity", "sqrt")))
+addCollectUsageHandler("quasibinomial", "stats",
+                       mkLinkHandler("quasibinomial",
+                                     c("logit", "probit", "cloglog",
+                                       "cauchit", "log")))
+addCollectUsageHandler("quasipoisson", "stats",
+                       mkLinkHandler("quasipoisson",
+                                     c("log", "identity", "sqrt")))
+addCollectUsageHandler("quasi", "stats", function(e, w) {
+    w$enterGlobal("function", "quasi", e, w)
+    # **** don't look at arguments for now.  Need to use match.call
+    # **** to get this right and trap errors. Later ...
+})
+@ %def
+
+Some test cases:
+<<test cases for link functions>>=
+checkUsage(function() binomial(logit))
+checkUsage(function() binomial(foo))
+checkUsage(function() binomial("foo"))
+checkUsage(function() binomial(1,2))
+checkUsage(function() gaussian('log'))
+checkUsage(function() gaussian(foo))
+checkUsage(function() gaussian('foo'))
+checkUsage(function() quasi(1,2))
+checkUsage(function() quasi(foo,bar))
+checkUsage(function() quasi(1,2))
+checkUsage(function() quasi(1,2,3))
+@ %def
+
+The following usage handler for [[if]] expressions attempts to
+constant fold the condition.  If this succeeds then only the
+consequent or the alternative is processed, depending on whether the
+condition is true or false.
+<<collectUsage>>=
+
+addCollectUsageHandler("if", "base", function(e, w) {
+    w$enterGlobal("function", "if", e, w)
+    test <- constantFoldEnv(e[[2]], w$env)
+    if (is.logical(test) && length(test) == 1 && ! is.na(test)) {
+        walkCode(e[[2]], w)
+        if (test) walkCode(e[[3]], w)
+        else if (length(e) > 3) walkCode(e[[4]], w)
+    }
+    else collectUsageArgs(e, w)
+})
+@ %def
+
+<<test code>>=
+assert(! "y" %in% findGlobals(function() if (is.R()) x else y))
+assert(identical(findGlobals(function() if (FALSE) x), "if"))
+@ %def
+
+\subsection{Finding Global Variables}
+<<collectUsage>>=
+
+##
+## Finding global variables
+##
+
+findGlobals <- function(fun, merge = TRUE) {
+    vars <- mkHash()
+    funs <- mkHash()
+    enter  <- function(type, v, e, w)
+        if (type == "function")
+            assign(v, TRUE, funs)
+        else assign(v, TRUE, vars)
+    collectUsage(fun, enterGlobal = enter)
+    fnames <- ls(funs, all.names = TRUE)
+    vnames <- ls(vars, all.names = TRUE)
+    if (merge)
+        sort(unique(c(vnames, fnames)))
+    else list(functions = fnames, variables = vnames)
+}
+@ %def findGlobals
+<<codetools exports>>=
+export(findGlobals)
+@ %def
+
+<<test code>>=
+# **** need more test cases here
+assert(identical(sort(findGlobals(function(x) { z <- 1; x + y + z})),
+                 sort(c("<-", "{",  "+",  "y"))))
+
+assert(identical(findGlobals(function() Quote(x)), "Quote"))
+@ %def
+<<test function>>=
+checkFindGlobals <- function(env) {
+    for (n in ls(env, all=TRUE)) {
+        v<-get(n, env)
+        if (typeof(v)=="closure") {
+            new <- findGlobals(v)
+            old <- codetools:::findGlobals0(v)
+            if (is.null(old))
+                old <- character(0)
+            else old <- sort(old)
+            if (! identical(new, old)) {
+                newNotOld <- new[! new %in% old]
+                oldNotNew <- old[! old %in% new]
+                cat((paste(n, "\n", sep = ":")))
+                if (length(newNotOld > 0))
+                    cat(paste("new not in old:",
+                              paste(newNotOld,collapse=", "), "\n"))
+                if (length(oldNotNew > 0))
+                    cat(paste("old not in new:",
+                              paste(oldNotNew,collapse=", "), "\n"))
+                browser()
+            }
+        }
+    }
+}
+@ %def
+
+\section{Checking Function and Variable Usage}
+**** try to add local vars one expression at a time in [[{}]] sequences,
+handle branches of [[if]] separately, etc.
+**** warn if [[assign(x,y)]] (i.e. no env) used.
+**** add locals argument for local masking
+**** use locals argument of findLocalsList
+**** optional control over [[with]], maybe others?
+<<checkUsage>>=
+
+##
+## Checking function and variable usage
+##
+
+checkUsageStartLocals <- function(parnames, locals, w) {
+    env <- w$env
+    nplocals <- locals[! locals %in% parnames]
+    attr(env, "checkUsageFrame") <- env # for sanity check
+    mkentry <- function(parameter) {
+        entry <- mkHash()
+        assign("parameter", parameter, envir = entry)
+        assign("assigns", 0, envir = entry)
+        assign("varuses", 0, envir = entry)
+        assign("funuses", 0, envir = entry)
+        assign("funforms", NULL, envir = entry)
+        assign("loopvars", 0, envir = entry)
+        assign("srcinfo", NULL, envir = entry)
+        entry
+    }
+    for (v in parnames) assign(v, mkentry(TRUE), envir = env)
+    for (v in nplocals) assign(v, mkentry(FALSE), envir = env)
+}
+
+getLocalUsageEntry <- function(vn, w) {
+    env <- findOwnerEnv(vn, w$env, stop = w$globalenv, default = .BaseEnv)
+    if (is.baseenv(env)) stop("no local variable entry")
+    if (! identical(env, attr(env, "checkUsageFrame")))
+        stop("sanity check on local usage frame failed")
+    entry <- get(vn, envir = env, inherits = FALSE)
+    if (! is.environment(entry)) stop("bad local variable entry")
+    entry
+}
+
+getLocalUsageValue <- function(vn, which, w)
+    get(which, getLocalUsageEntry(vn, w), inherits = FALSE)
+
+setLocalUsageValue <- function(vn, which, value, w)
+    assign(which, value, envir = getLocalUsageEntry(vn, w))
+
+incLocalUsageValue <- function(vn, which, w) {
+    entry <- getLocalUsageEntry(vn, w)
+    value <- get(which, entry, inherits = FALSE)
+    assign(which, value + 1, entry)
+}
+
+incLocalSrcInfo <- function(vn, w) {
+    entry <- getLocalUsageEntry(vn, w)
+    value <- get("srcinfo", entry, inherits = FALSE)
+    new <- list(srcfile = if (is.null(w$srcfile)) NA_character_ else w$srcfile,
+                frow = if (is.null(w$frow)) NA_integer_ else w$frow,
+                lrow = if (is.null(w$lrow)) NA_integer_ else w$lrow)
+    new <- as.data.frame(new, stringsAsFactors = FALSE)
+    if (is.null(value))
+        value <- new
+    else
+        value <- rbind(value, new)
+    assign("srcinfo", value, entry)
+}
+
+addLocalFunDef <- function(vn, e, w) {
+    entry <- getLocalUsageEntry(vn, w)
+    value <- get("funforms", entry, inherits = FALSE)
+    assign("funforms", c(value, list(e[[3]][[2]])), entry)
+}
+
+checkUsageEnterLocal <- function(type, n, e, w) {
+    if (type %in% c("<-", "<<-") && isSimpleFunDef(e, w))
+        type <- "fundef"
+    switch(type,
+        "<-" =,
+        "<<-" = incLocalUsageValue(n, "assigns", w),
+        "variable" = incLocalUsageValue(n, "varuses", w),
+        "function" = incLocalUsageValue(n, "funuses", w),
+        "for" = incLocalUsageValue(n, "loopvars", w),
+        "fundef" = addLocalFunDef(n, e, w))
+    incLocalSrcInfo(n,w)
+}
+
+suppressVar <- function(n, suppress) {
+    if (is.logical(suppress)) {
+        if (suppress) TRUE else FALSE
+    }
+    else n %in% suppress
+}
+
+#**** need test code
+#**** merge warnings?
+checkUsageFinishLocals <- function(w) {
+    vars <- ls(w$env, all.names = TRUE)
+    for (v in vars) {
+        if (! suppressVar(v, w$suppressLocal)) {
+            parameter <- getLocalUsageValue(v, "parameter", w)
+	    assigns <- getLocalUsageValue(v, "assigns", w)
+	    varuses <- getLocalUsageValue(v, "varuses", w)
+	    funuses <- getLocalUsageValue(v, "funuses", w)
+	    loopvars <- getLocalUsageValue(v, "loopvars", w)
+	    funforms <- getLocalUsageValue(v, "funforms", w)
+	    uses <- max(varuses, funuses, loopvars)
+
+            srcinfo <- getLocalUsageValue(v, "srcinfo", w)
+            w$srcfile <- srcinfo[1,"srcfile"]
+            w$frow <- srcinfo[1,"frow"]
+            w$lrow <- srcinfo[1,"lrow"]
+
+            if (parameter) {
+                if (! suppressVar(v, w$suppressParamAssigns) && assigns > 0)
+                    w$signal(paste("parameter", sQuote(v),
+                                   "changed by assignment"), w)
+                else if (! suppressVar(v, w$suppressParamUnused) &&
+                         uses == 0 && v != "...")
+                    w$signal(paste("parameter", sQuote(v), "may not be used"),
+                             w)
+            }
+            else {
+                if (uses == 0) {
+                    if (! suppressVar(v, w$suppressLocalUnused))
+                        w$signal(paste("local variable", sQuote(v),
+                                       "assigned but may not be used"), w)
+                }
+                else if (funuses > 0 && is.null(funforms)) {
+                    if (! suppressVar(v, w$suppressNoLocalFun))
+                        w$signal(paste("local variable", sQuote(v),
+                                       "used as function with no apparent",
+                                       "local function definition"), w)
+                }
+            }
+            if (! suppressVar(v, w$suppressFundefMismatch) &&
+                length(funforms) > 1) {
+                first <- funforms[[1]]
+                nfirst <- names(first)
+                for (d in funforms[-1])
+                    if (! identical(first, d) ||
+                        ! identical(nfirst, names(d))) {
+                        w$signal(paste("multiple local function",
+                                       "definitions for", sQuote(v),
+                                       "with different formal arguments"), w)
+                        break
+                    }
+            }
+        }
+    }
+}
+
+#**** warn if non-function used as variable (most likely get false positives)
+#**** merge warnings?
+checkUsageEnterGlobal <- function(type, n, e, w) {
+    if (type == "function") {
+        if (exists(n, envir = w$globalenv, mode = "function")) {
+            # **** better call check here
+            def <- get(n, envir = w$globalenv, mode = "function")
+            if (typeof(def) == "closure")
+                checkCall(def, e, function(m) w$signal(m, w))
+            else {
+                isBuiltin <- typeof(def) == "builtin"
+                checkPrimopCall(n, e, isBuiltin, function(m) w$signal(m, w))
+            }
+        }
+        else if (! suppressVar(n, w$suppressUndefined))
+            w$signal(paste("no visible global function definition for",
+                           sQuote(n)), w)
+    }
+    else if (type == "variable") {
+        if (! exists(n, w$globalenv) && ! suppressVar(n, w$suppressUndefined))
+            w$signal(paste("no visible binding for global variable",
+                           sQuote(n)), w)
+    }
+    else if (type == "<<-") {
+        if (! exists(n, w$globalenv))
+            w$signal(paste("no visible binding for '<<-' assignment to",
+                           sQuote(n)), w)
+    }
+}
+
+dfltSuppressUndefined <- c(".Generic", ".Method", ".Class",
+    ".split.valid.screens", ".split.cur.screen", ".split.saved.pars",
+    ".split.screens", ".split.par.list", "last.dump")
+
+#**** merge undefined variable warnings per top level function (at least)
+#**** allow complete suppress or by name for all??
+checkUsage <- function(fun, name = "<anonymous>",
+                       report = cat,
+                       all = FALSE,
+                       suppressLocal = FALSE,
+                       suppressParamAssigns = ! all,
+                       suppressParamUnused = !all,
+                       suppressFundefMismatch = FALSE,
+                       suppressLocalUnused = FALSE,
+                       suppressNoLocalFun = ! all,
+                       skipWith = FALSE,
+                       suppressUndefined = dfltSuppressUndefined,
+                       suppressPartialMatchArgs = TRUE) {
+    if (is.null(getOption("warnPartialMatchArgs")))
+        options(warnPartialMatchArgs = FALSE)
+    if (! suppressPartialMatchArgs) {
+        oldOpts <- options(warnPartialMatchArgs = TRUE)
+        on.exit(options(oldOpts))
+    }
+    tryCatch(collectUsage(fun, name = name,
+                          warn = report,
+                          suppressLocal = suppressLocal,
+                          suppressParamAssigns = suppressParamAssigns,
+                          suppressParamUnused = suppressParamUnused,
+                          suppressFundefMismatch = suppressFundefMismatch,
+                          suppressLocalUnused = suppressLocalUnused,
+                          suppressNoLocalFun = suppressNoLocalFun,
+                          skipWith = skipWith,
+                          enterGlobal = checkUsageEnterGlobal,
+                          enterLocal = checkUsageEnterLocal,
+                          startCollectLocals = checkUsageStartLocals,
+                          finishCollectLocals = checkUsageFinishLocals,
+                          suppressUndefined = suppressUndefined,
+                          suppressPartialMatchArgs = suppressPartialMatchArgs),
+             error = function(e) {
+                         report(paste0(name, ": Error while checking: ",
+                                       conditionMessage(e), "\n"))
+                     })
+    invisible(NULL)         
+}
+
+checkUsageEnv <- function(env, ...) {
+    for (n in ls(env, all.names=TRUE)) {
+        v <- get(n, envir = env)
+        if (typeof(v)=="closure")
+            checkUsage(v, name = n, ...)
+    }
+}
+checkUsagePackage <- function(pack, ...) {
+    pname <- paste("package", pack, sep = ":")
+    if (! pname %in% search())
+        stop("package must be loaded")
+    if (pack %in% loadedNamespaces())
+        checkUsageEnv(getNamespace(pack), ...)
+    else checkUsageEnv(as.environment(pname), ...)
+}
+@ %def
+
+<<checkUsage>>=
+#++++ check against internal arg count?
+
+primopArgCounts <- mkHash()
+
+anyMissing <- function(args) {
+    for (i in 1:length(args)) {
+        a <-args[[i]]
+        if (missing(a)) return(TRUE) #**** better test?
+    }
+    return(FALSE)
+}
+
+noMissingAllowed <- c("c")
+
+checkPrimopCall <- function(fn, e, isBuiltin, signal = warning0) {
+    if (anyMissing(e[-1])) {
+        if (isBuiltin || fn %in% noMissingAllowed)
+            signal(paste("missing arguments not allowed in calls to",
+                         sQuote(fn)))
+    }                   
+    if (exists(".GenericArgsEnv") && exists(fn, get(".GenericArgsEnv"))) {
+        def <- get(fn, envir = get(".GenericArgsEnv"))
+        checkCall(def, e, signal)
+    }
+    else if (exists(".ArgsEnv") && exists(fn, get(".ArgsEnv"))) {
+        def <- get(fn, envir = get(".ArgsEnv"))
+        checkCall(def, e, signal)
+    }
+    else if (exists(fn, envir = primopArgCounts, inherits = FALSE)) {
+        argc <- get(fn, envir = primopArgCounts)
+        if (! any(argc == (length(e) - 1))) {
+            signal(paste("wrong number of arguments to", sQuote(fn)))
+            FALSE
+        }
+        else TRUE
+    }
+    else TRUE
+}
+
+local({
+    zeroArgPrims <- c("break", "browser", "gc.time", "globalenv",
+                      "interactive", "nargs", "next", "proc.time")
+    for (fn in zeroArgPrims) assign(fn, 0, envir = primopArgCounts)
+
+    zeroOrOneArgPrims <- c("invisible")
+    for (fn in zeroOrOneArgPrims) assign(fn, 0:1, envir = primopArgCounts)
+
+    oneArgPrims <- c("!", "(", "abs", "sqrt", "cos", "sin", "tan", "acos",
+                     "asin", "atan", "Re", "Im", "Mod", "Arg", "Conj",
+                     "cosh", "sinh", "tanh", "acosh", "asinh", "atanh",
+                     "sign", "length", "repeat", ".Primitive",
+                     "class", "oldClass", "standardGeneric", "unclass",
+                     "ceiling", "floor", "trunc",
+                     "is.array", "is.atomic", "is.call", "is.character",
+                     "is.complex", "is.double",
+                     "is.environment", "is.expression", "is.finite",
+                     "is.function", "is.infinite", "is.integer",
+                     "is.language", "is.list", "is.loaded", "is.logical",
+                     "is.matrix", "is.na", "is.name", "is.nan", "is.null",
+                     "is.numeric", "is.object", "is.pairlist", "is.real",
+                     "is.recursive", "is.single", "is.symbol",
+                     "debug", "undebug", "as.character", "as.call",
+                     "as.environment", "attributes", "cumsum", "cumprod",
+                     "cummax", "cummin", "dim", "dimnames", "exp", "missing",
+                     "pos.to.env", ".primTrace", ".primUntrace",
+                     "symbol.C", "symbol.For")
+    for (fn in oneArgPrims) assign(fn, 1, envir = primopArgCounts)
+
+    oneOrTwoArgPrims <- c("+", "-")
+    for (fn in oneOrTwoArgPrims) assign(fn, 1:2, envir = primopArgCounts)
+
+    twoArgPrims <- c("*", "/", "%%", "^", "<", "<=", "==", ">", ">=",
+                     "|", "||", ":", "!=", "&", "&&", "%/%", "%*%",
+                     "while", "attr", "attributes<-", "class<-",
+                     "oldClass<-", "dim<-", "dimnames<-", "environment<-",
+                     "length<-", "reg.finalizer")
+    for (fn in twoArgPrims) assign(fn, 2, envir = primopArgCounts)
+
+    assign("on.exit", 0:2, primopArgCounts)
+})
+@ %def
+**** way to declare nonstandard eval?
+
+**** checking of primitive functions
+
+**** check over handling of missing
+
+**** make sure all handlers do enterGlobalFunUse (except "function" maybe)
+
+**** generic that handles assigns, loop assigns, local/global calls, refs,
+
+**** collect warnings, etc.
+
+**** need start/end hooks for function, local
+
+**** deal with cases where variables is guaranteed to be local; value is known
+(e.g. constant or function) (does this happen much??)
+
+**** constant folding in sheckUsage?
+
+**** detect dead code?
+
+**** any use at all to CPS/ANF conversion
+
+**** do some profiling
+
+**** send warnings about summaries
+
+**** add ckecking of primitives
+
+**** make package call graph
+
+**** warn about shadowing, especially for local functions?
+
+<<>>= 
+f(g(x, 2), 1) <- y
+
+tmp1 <- g(x, 2)
+tmpv <- "f<-"(tmp1, 1, value = y)
+"g<-"(x, 2, value = tmpv)
+
+f(g(h(x, 3), 2), 1) <- y
+
+tmp1 <- h(x, 3)
+tmp2 <- g(tmp1, 2)
+tmpv <- "f<-"(tmp2, 1, value = y))
+tmpv <- "g<-"(tmp1, 2, value = tmpv)
+"h<-"(x, 3, value = *tmp*)
+    
+
+f(g(h(k(x, 4), 3), 2) 1) <- y
+
+tmp1 <- k(x, 4)
+tmp2 <- h(tmp1, 3)
+tmp3 <- g(tmp2, 2)
+tmpv <- "f<-"(tmp3, 1, value = y)
+tmpv <- "g<-"(tmp2, 2, value = tmpv)
+tmpv <- "h<-"(tmp1, 3, value = tmpv)
+"k<-"(x, 4, value = tmpv)
+
+f(g(h(k(l(x, 5), 4), 3), 2) 1) <- y
+
+x <- x  # if not local already
+tmp1 <- l(x, 5)
+tmp2 <- k(tmp1, 4)
+tmp3 <- h(tmp2, 3)
+tmp4 <- g(tmp3, 2)
+tmpv <- "f<-"(tmp4, 1, value = y)
+tmpv <- "g<-"(tmp3, 2, value = tmpv)
+tmpv <- "h<-"(tmp2, 3, value = tmpv)
+tmpv <- "k<-"(tmp1, 4, value = tmpv)
+"l<-"(x, 5, value = tmpv)
+@ %def
+
+<<>>=
+> checkUsage(function(x) f<-function(y) z<-y, "g")
+Function: g f 
+parameter y = 1 0 0 0 0 
+local z = 0 0 1 0 0 
+Function: g 
+parameter x = 0 0 0 0 0 
+local f = 0 0 1 1 0 
+local z = 0 0 0 0 0 
+global <- = 0 2 
+> checkUsage(function(x) f<-function(y) z<<-y, "g")
+Function: g f 
+parameter y = 1 0 0 0 0 
+Function: g 
+parameter x = 0 0 0 0 0 
+local f = 0 0 1 1 0 
+global <<- = 0 1 
+global <- = 0 1 
+global z = 1 0 
+Warning message: 
+**** <<- assignments not handled properly yet in: h(e, w) 
+@ %def
+
+<<>>=
+primDefs = new.env(hash=TRUE, parent = NULL)
+
+addPrimDef <- function(name, fun)
+    assign(name, fun, envir = primDefs)
+
+getPrimDef <- function(name)
+    if (exists(name, envir = primDefs, inherits = FALSE))
+        get(name, envir = primDefs)
+
+addPrimDef("atan", function(x){})
+
+prims <- NULL
+for (n in ls(NULL, all=TRUE))
+    if (typeof(get(n, envir = NULL)) %in% c("special", "builtin"))
+        prims <- c(prims, n)
+
+some have argc requirement
+some have type requirement
+some allow missings
+@ %def
+
+
+\section{Partial Evaluation (was Constant Folding)}
+The code walker can also be used as the basis for a constant folding
+function.  In this example the value returned by [[walkCode]] is a
+possibly folded version of the original expression.
+
+Constant folding involves evaluating calls to certain functions, such
+as standard numeric functions, when the arguments can be determined to
+be constant expressions.  The process of constant folding is applied
+recursively.  Because of the lazy evaluation semantics in R, a
+sub-expression can only be evaluated if the function in the outer call
+is a function for which folding is possible.  For calls to generic
+functions where one argument can be folded to a constant but others
+cannot, one could argue that no folding should be done since
+
+The constant folder adds five to the code walker.  [[maxfold]] is the
+maximum length of a vector that will be accepted as a folded constant.
+[[isLocal]] is used to determine whether a shadowing local definition
+of a foldable global function exists.  [[isFoldable]] determines
+whether a function is to be considered foldable or not, and
+[[isConstant]] determines whether a value is to be considered a
+constant..  The function [[signal]] is used to handle any error that
+occur in an evaluation.
+<<partialEval>>=
+makePartialEvaluator <- function(...,
+                                 leaf = peLeaf,
+                                 handler = getPEhandler,
+                                 call = function(e, w) e,
+                                 maxfold = 512,
+                                 isLocal = function(v, w) FALSE,
+                                 foldable = isFoldable,
+                                 isConstant = isConstantValue,
+                                 signal = function(e, msg, w) warning(msg))
+     list(handler = handler, call = call, leaf = leaf, maxfold = maxfold,
+          isLocal = isLocal, foldable = isFoldable,
+          isConstant = isConstant, signal = signal, ...)
+@ %def makePartialEvaluator
+
+The constant folder used in the current experimental byte code
+compiler returns [[NULL]] if folding does not produce a constant
+result.  This means that folds that produce the constant [[NULL]] are
+ignored at present.
+**** return NULL if not folded?? wrap in list??
+**** isBase instead of isLocal??
+**** only apply size test at end??
+<<partialEval>>=
+partialEval <- function(e, env = NULL) {
+    w <- makePartialEvaluator(isLocal = function(v, w) findVar(v, env))
+    walkCode(e, w)
+}
+@ %def partialEval
+
+***** enter simple PE handler for foldFuns??
+
+Leaves that are variables may be replaced by the values of these
+variables if thy are correspond to global constants.
+<<partialEval>>=
+constNames <- c("pi", "T", "F")
+
+peLeaf <- function(e, w) {
+    if (is.name(e) && matchName(e, constNames) && ! w$isLocal(e, w))
+        get(as.character(e), envir = NULL)
+    else e
+}
+@ %def constNames foldLeaf
+
+Finally, calls to foldable functions are folded by recursively
+attempting to fold all arguments and, if successful, attempting to
+evaluate the call.
+<<partialEval>>=
+peHandlers <- new.env(hash=TRUE, parent=NULL)
+
+getPEhandler <- function(v, w)
+     if (! w$isLocal(v, w) && exists(v, envir = peHandlers, inherits = FALSE))
+        get(v, envir = peHandlers)
+
+addPEhandler <- function(v, h)
+     assign(v, h, envir = peHandlers)
+
+peCall <- function(e, w) {
+    args <- lapply(e[-1], function(e) walkCode(e, w))
+    if (all(sapply(args, w$isConstant, w))) {
+        fname <- as.character(e[[1]])
+        msg <- try({ v <- do.call(fname, args); NULL }, silent = TRUE)
+        if (! is.null(msg)) {
+            w$signal(e, msg, w)
+            e
+        }
+        else if (w$isConstant(v, w)) v
+        else e
+    }
+    else {
+        f <- get(as.character(e[[1]]), env = NULL)
+        if (typeof(f) %in% c("builtin", "special"))
+            as.call(c(list(f), args))
+        else as.call(c(list(e[[1]]), args))
+    }
+}
+
+for (v in foldFuns) addPEhandler(v, peCall)
+
+addPEhandler("if", function(e, w) {
+    args <- lapply(e[-1], function(e) walkCode(e, w))
+    if (identical(args[[1]], TRUE))
+        args[[2]]
+    else if (identical(args[[1]], FALSE))
+        args[[3]]
+    else as.call(c(list(get("if", envir = NULL)), args))})
+     
+
+
+simpleInternal <- function(e) {
+    if (anyDots(e))
+        FALSE
+    else {
+        name <- as.character(e[[1]])
+        def <- get(name, envir = NULL)
+        if (! checkCall(def, e, NULL)) return(FALSE)
+        margs <- as.list(match.call(def, e, FALSE))[-1]
+        cenv <- c(margs, formals(def))
+        lcall <- c(e[[1]],cenv[names(formals(def))])
+        names(lcall)<-NULL
+        call <- as.call(lcall)
+        call <- substitute(.Internal(call), list(call=call))
+        for (a in as.list(call[[2]][-1])) if (missing(a))
+            return(FALSE)
+        call
+    }
+}
+@ %def
+
+<<Xtest code>>=
+assert(identical(constantFold(quote(3)), 3))
+assert(identical(constantFold(quote(1+2)), 3))
+assert(identical(constantFold(quote(1+2+x), partial=TRUE), quote(3+x)))
+@ %def
+\section{Finding Globals in Assignments}
+<<>>=
+collectAssignFuns <- function(e, w) {
+    while (typeof(e) == "language" && typeof(e[[2]]) == "language") {
+        f1 <- as.character(checkSymOrString(e[[1]]))
+        f2 <- as.character(checkSymOrString(e[[2]][[1]]))
+        w$collectAssignCall(f1, e, w)
+        w$collectCall(f2, e[[2]], w)
+        for (a in e[-(1:2)]) walkCode(a, w)
+        e <- e[[2]]
+    }
+    if (typeof(e) == "language") {
+        f <- as.character(checkSymOrString(e[[1]]))
+        w$collectAssignCall(f, e, w)
+        for (a in e[-(1:2)]) walkCode(a, w)
+        e <- e[[2]]*****
+    }
+    e <- 
+    w$collectVariableRef(
+    unique(c(as.character(checkSymOrString(e)), funs))
+}
+@ %def
+****** try constant folding, usage checking with this
+
+<<>>=
+findAssignFuns <- function(e) {
+    funs <- NULL
+    while (typeof(e) == "language" && typeof(e[[2]]) == "language") {
+        f1 <- paste(as.character(checkSymOrString(e[[1]])), "<-", sep = "")
+        f2 <- as.character(checkSymOrString(e[[2]][[1]]))
+        funs <- unique(c(f1, f2, funs))
+        e <- e[[2]]
+    }
+    if (typeof(e) == "language") {
+        f <- paste(as.character(checkSymOrString(e[[1]])), "<-", sep = "")
+        funs <- unique(c(f, funs))
+        e <- e[[2]]
+    }
+    unique(c(as.character(checkSymOrString(e)), funs))
+}
+    
+@ %def
+
+**** find global functions, variables used (recursively also)
+**** warnings on global vars, local funs with no defs
+**** warnings on undefined globals
+**** check for use of eval
+**** inlining simple internals
+**** controlled partial evaluation and constant folding
+**** strictness analysis
+**** unused local variables
+**** try to identify when variables are guaranteed local
+**** unused local variables?
+**** identify/eliminate dead code (after return)
+**** need better loop context handling
+
+checkCode:
+
+check calls, global and local if possible
+record local, global uses as variable, function
+check for assignments in arguments, defaults
+bad uses of ..., ..n
+call to non-function constant
+mismatch on primitive call
+use of break, next without visible loop context
+identify use of eval, eval.parent, evalq
+
+need labeled context--nested function names, top expression in function
+
+Sometimes you can be lexically sure a local is defined, sometimes not.
+When yes, use def if function, val if constant
+
+strictness analysis?
+
+
+<<codetools.R>>=
+## WARNING:
+## This code is a complete hack, may or may not work, etc..
+## Use your own risk.  You have been warned.
+##
+## This file is generated from ../noweb/codetools.nw; make changes there.
+
+##
+## Environment utilities
+##
+
+.BaseEnv <- if (exists("baseenv")) baseenv() else NULL
+.EmptyEnv <- if (exists("emptyenv")) emptyenv() else NULL
+
+is.emptyenv <- function(e) identical(e, .EmptyEnv)
+is.baseenv <- function(e) identical(e, .BaseEnv)
+
+mkHash <- function() new.env(hash = TRUE, parent = .EmptyEnv)
+
+##
+## Code walker
+##
+
+<<walkCode>>
+
+##
+## Call tree display
+##
+
+<<showTree>>
+
+##
+## Call with current continuation
+##
+
+<<callCC>>
+
+##
+## Constant folding
+##
+
+<<constantFold>>
+
+##
+## Finding local variables
+##
+
+<<findLocals>>
+
+##
+## Assignment handling
+##
+
+<<getAssignedVar>>
+
+<<flattenAssignment>>
+
+##
+## Collecting usage information
+##
+
+<<collectUsage>>
+
+<<checkUsage>>
+
+<<findVar>>
+
+<<checkCall>>
+
+##
+## Various utilities
+##
+
+<<warning0 and stop0>>
+<<utilities>>
+@ %def
+
+<<omitted>>=
+<<writing graphviz .dot files>>
+<<callGraph>>
+@ %def
+
+<<proftools.R>>=
+<<writing graphviz .dot files>>
+<<profileGraph>>
+@ %def
+
+<<tests.R>>=
+library(codetools)
+assert <- function(e)
+    if (! e) stop(paste("assertion failed:", deparse(substitute(e))))
+<<test code>>
+@ %def
+
+<<findVar>>=
+matchName <- function(name, list)
+    if (match(as.character(name), list, 0)) TRUE else FALSE
+
+findVar <- function(e, env) matchName(e, env)
+@ %def
+
+<<oldFindGlobals>>=
+#***** need special for others?
+#***** separate out function and variable usage
+findGlobals0 <- function(e, env = .BaseEnv) {
+    if (typeof(e) == "language") {
+        if (typeof(e[[1]]) == "symbol" || is.character(e[[1]])) {
+            fun <- as.character(e[[1]])
+            switch(fun,
+                "function" = findFuncGlobals0(e[[2]], e[[3]], env),
+                "local" =  #**** only ok if single arg
+                   unique(c("local",
+                            findGlobals0(e[[2]],
+                                        unique(c(findLocals(e[[2]]), env))))),
+                ".Internal" = unique(c(".Internal",
+                                       findGlobalsInList0(e[[2]][-1], env))),
+                "~" =,   # could argue that formula variables should count
+                "expression" =,
+                "quote" = fun,
+                "substitute" =
+                    {
+                        if (length(e) == 3) {
+                            a <- e[[3]]
+                            if (missing(a)) fun
+                            else unique(c(fun, findGlobals0(e[[3]], env)))
+                        }
+                        else fun
+                    },
+                "=" =,
+                "<<-" =,
+                "<-" =
+                     if (typeof(e[[2]]) == "language") {
+                         fa <- flattenAssignment(e[[2]])
+                         fal <- c(fa[[1]], fa[[2]], list(e[[3]]))
+                         nenv <- c("*tmp*","*tmpv*", env)
+                         unique(c(fun, findGlobalsInList0(fal, nenv)))
+                     }
+                     else findGlobalsInList0(e, env),
+                "$" =,
+                "@" = unique(c(fun, findGlobals0(e[[2]], env))),
+                "$<-" =,
+                "$@<-" = findGlobalsInList0(e[-3], env),
+                "::" =,
+                ":::" = fun,
+                findGlobalsInList0(e, env))
+        }
+        else findGlobalsInList0(e, env)
+    }
+    else if (typeof(e) == "symbol" && ! findVar(e, env))
+        as.character(e)
+    else if (typeof(e) == "closure")
+        findFuncGlobals0(formals(e), body(e), env)
+}
+
+funEnv <- function(forms, body, env = .BaseEnv)
+    unique(c(names(forms), findLocals(body), env))
+
+findFuncGlobals0 <- function(formals, body, env)
+    findGlobalsInList0(c(formals, list(body)), funEnv(formals, body, env))
+
+findGlobalsInList0 <- function(el, env)
+    unique(unlist(lapply(dropMissings(as.list(el)), findGlobals0, env)))
+
+getAssignFuncs <- function(e, env) {
+    val <- NULL
+    v <- e[[2]];
+    while (typeof(v) == "language") {
+        if (typeof(v[[1]]) != "symbol" && typeof(v[[1]]) != "character")
+            stop0("bad assignment expression")
+        afun <- paste(as.character(v[[1]]), "<-", sep="")
+        if (! findVar(afun, env))
+            val <- unique(c(afun, val))
+        v <- v[[2]]
+    }
+    if (typeof(v) != "symbol" && typeof(v) != "character")
+        stop0(paste("bad assignment:", pasteExpr(e)))
+    val
+}
+
+recursiveFindGlobals <- function(roots) {
+    vals <- NULL
+    while (length(roots) > 0) {
+        vals <- unique(c(roots[1], vals))
+        if (exists(roots[1])) {
+            new <- findGlobals(get(roots[1]), vals)
+            vals <- unique(c(new, vals))
+            roots <- unique(c(new, roots[-1]))
+        }
+        else roots <- roots[-1]
+    }
+    vals
+}
+
+localEnvVars <- function(env) {
+    vars <- NULL;
+    top <- topenv(env)
+    if (is.null(top)) stop("can't find top level environment")#**** not reached
+    while (! identical(env, top)) {
+        vars <- unique(c(ls(env, all=TRUE), vars))
+        env <- parent.env(env)
+    }
+    vars
+}
+@ %def
+
+<<oldFindGlobals>>=
+makeAssignTemps <- function(lhs, index=1) {
+    if (typeof(lhs) == "language") {
+        tail <- makeAssignTemps(lhs[[2]], index + 1)
+        lhs[[2]] <- tail[[1]][[2]]
+        tmpvar <- as.name(paste("tmp", index,sep=""))
+        c(tail, list(as.call(list(as.name("<-"), tmpvar, lhs))))
+    }
+    else if (typeof(lhs) == "symbol")
+        list(as.call(list(as.name("<-"), lhs, lhs)))
+    else stop0("bad assignment expression")
+}
+
+makeAssigns <- function(lhs, v, index = 1) {
+    if (typeof(lhs) == "language") {
+        nextlhs <- lhs[[2]]
+        lhs[[2]] <- as.name(paste("tmp", index,sep=""))
+        lhs[[1]] <- paste(as.character(lhs[[1]]), "<-", sep="")
+        v <- as.call(c(as.list(lhs), list(value = v)))
+        makeAssigns(nextlhs, v, index + 1)
+    }
+    else if (typeof(lhs) == "symbol")
+        as.call(list(as.name("<-"), lhs, v))
+    else stop0("bad assignment expression")
+}
+
+#******* this is wrong!!!
+flattenComplexAssign <- function(e)
+    c(makeAssignTemps(e[[2]]), list(makeAssigns(e[[2]], e[[3]])))
+@ %def
+<<>>=
+> flattenComplexAssign(quote(f(g(x,2),1)<-y))
+x <- x  # if not local already
+tmp2 <- g(x, 2)
+f(tmp2, 1) <- y
+g(x, 2) <- tmp2
+
+f(g(x, 2), 1) <- y
+
+"g<-"(x, 2, value = "f<-"(g(x, 2), value = y))
+
+f(g(h(x, 3), 2), 1) <- y
+
+tmp1 <- h(x, 3)
+tmpv <- "f<-"(g(tmp1, 2), 1, value = y))
+tmpv <- "g<-"(tmp1, 2, value = tmpv)
+"h<-"(x, 3, value = *tmp*)
+    
+
+f(g(h(k(x, 4), 3), 2) 1) <- y
+
+tmp1 <- k(x, 4)
+tmp2 <- h(tmp1, 3)
+tmpv <- "f<-"(g(tmp2, 2), 1, value = y)
+tmpv <- "g<-"(tmp2, 2, value = tmpv)
+tmpv <- "h<-"(tmp1, 3, value = tmpv)
+"k<-"(x, 4, value = tmpv)
+
+f(g(h(k(l(x, 5), 4), 3), 2) 1) <- y
+
+x <- x  # if not local already
+tmp1 <- l(x, 5)
+tmp2 <- k(tmp1, 4)
+tmp3 <- h(tmp2, 3)
+tmpv <- "f<-"(g(tmp3, 2), 1, value = y)
+tmpv <- "g<-"(tmp3, 2, value = tmpv)
+tmpv <- "h<-"(tmp2, 3, value = tmpv)
+tmpv <- "k<-"(tmp1, 4, value = tmpv)
+"l<-"(x, 5, value = tmpv)
+@ %def
+
+<<old showTree>>=
+showTree <- function(e, top=TRUE) {
+    type <- typeof(e)
+    if (type == "language") {
+        cat("(");
+        showTree(e[[1]], FALSE)
+        for (a in as.list(e[-1])) {
+            cat(" ");
+            showTree(a, FALSE);
+        }
+        cat(")")
+    }
+    else if (type == "symbol") {
+        if (e == "(") cat("\"(\"")
+        else if (e == "{") cat("\"{\"")
+        else cat(e)
+    }
+    else cat(deparse(e))
+    if (top) cat("\n")
+}
+@ %def
+
+<<>>=
+partialFold <- function(e, env = NULL) {
+    if (typeof(e) == "language") {
+        fun <- e[[1]]
+        if ((typeof(fun) == "symbol" || typeof(fun) == "character") &&
+            matchName(fun, foldFuns) && ! findVar(fun, env)) {
+            args <- lapply(as.list(e[-1]), partialFold, env)
+            if (all(unlist(lapply(args, isConstantValue)))) {
+                v <- do.call(as.character(fun), args)
+                if (isConstantValue(v)) v
+                else as.call(c(list(fun), args))
+            }
+            else as.call(c(list(fun), args))
+        }
+        else e
+    }
+    else if (typeof(e) == "symbol") {
+        if (matchName(e, constNames) && ! findVar(e, env)) {
+            v <- get(as.character(e)) #**** use env
+            if (isConstantValue(v)) v
+            else e
+        }
+        else e
+    }
+    else if (isConstantValue(e)) e
+}    
+@ %def
+
+\begin{verbatim}
+partial evaluation:
+
+> f<-function(x) (1/sqrt(2*pi)) * exp(-0.5 * x^2)
+showTree(partialFold(body(f)))
+> showTree(partialFold(body(f)))
+(* 0.398942280401433 (exp (* -0.5 (^ x 2))))
+g <- function (x) 
+.Primitive("*")(0.398942280401433, .Primitive("exp")(.Primitive("*")(-0.5, 
+    .Primitive("^")(x, 2))))
+
+> system.time(for (i in 1:100000) log(3.0))
+[1] 0.38 0.10 0.48 0.00 0.00
+> system.time(for (i in 1:100000) .Internal(log(3.0)))
+[1] 0.16 0.00 0.16 0.00 0.00
+\end{verbatim}
+
+<<checkCall>>=
+      matchCall <- function(def, call, ...) {
+    ## the ... machinations are needed to prevent match.call from signaling
+    ## an error when the call contains a ... argument, and to work with
+    ## versions of match.call that do or do not have the envir argument
+    ## added for R 3.2.0
+    fun <- function(...) 
+        match.call(def, call, FALSE)
+    fun()
+}
+
+checkCall <- function(def, call, signal = warning0) {
+    testMatch <- function() 
+        ## withCallingHandlers is used to capture partial argument
+	## matching warnings if enabled.
+        withCallingHandlers(matchCall(def, call),
+            warning = function(w) {
+	        msg <- conditionMessage(w)
+	        signal(paste("warning in ",
+		             deparse(call, width.cutoff = 500),
+                             ": ", msg, sep=""))
+                invokeRestart("muffleWarning")
+            })
+    msg <- tryCatch({testMatch(); NULL},
+                    error = function(e) conditionMessage(e))
+    if (! is.null(msg)) {
+        emsg <- paste("possible error in ", deparse(call, width.cutoff = 500),
+                      ": ", msg, sep="")
+        if (! is.null(signal)) signal(emsg)
+        FALSE
+    }
+    else TRUE
+}
+@ %def
+
+<<cbuf>>=
+make.codeBuf <- function() {
+    code <- list(.Internal(bcVersion()))
+    const <- vector("list")
+    labels <- vector("list")
+    globvars <- vector("list")
+    locfuns <- vector("list")
+    undefs <- vector("list")
+    idx <- 0
+    list(code = function() {
+             n <- length(code)
+             if (n > 0) {
+                 for (i in 1:n) {
+                     v <- code[[i]]
+                     if (is.character(code[[i]]) && ! is.null(labels[[v]]))
+                         code[[i]] <- labels[[v]]
+                 }
+             }
+             as.integer(code)
+         },
+         const = function() const,
+         makelabel = function() { idx <<- idx + 1; paste("L", idx, sep="") },
+         putcode = function(...) code <<- c(code, list(...)),
+         putconst = function(x) {
+             n <- length(const)
+             if (n > 0) {
+                 if (is.symbol(x))
+                     for (i in 1:n)
+                         if (is.symbol(const[[i]]) && x == const[[i]])
+                             return(i-1)
+             }
+             # if (is.null(x)) const <<- c(const, list(NULL))
+             # else const[[n + 1]] <<- x
+             const <<- .Internal(putconst(const, x))
+             n
+         },
+         putlabel = function(name) labels[[name]] <<- length(code),
+         globvars = function() globvars,
+         add.globvar = function(v) if (matchName(v, globvars) == 0)
+                           globvars <<- c(globvars, v),
+         locfuns = function() locfuns,
+         add.locfun = function(v) if (matchName(v, locfuns) == 0)
+                          locfuns <<- c(locfuns, v),
+         undefs = function() undefs,
+         add.undef = function(v) if (matchName(v, undefs) == 0)
+                         undefs <<- c(undefs, v),
+         warn = function(x) cat(paste("Note:", x, "\n")))
+}
+@ %def
+
+**** should these also worry about ..3 and such??
+<<utilities>>=
+dotsOrMissing <- function(args) {
+    for (i in 1:length(args)) {
+        a <-args[[i]]
+        if (missing(a)) return(TRUE) #**** better test?
+        if (typeof(a) == "symbol" && a == "...") return(TRUE)
+    }
+    return(FALSE)
+}
+
+anyDots <- function(args) {
+    for (i in 1:length(args)) {
+        a <-args[[i]]
+        if (! missing(a) && typeof(a) == "symbol" && a == "...")
+            return(TRUE)
+    }
+    return(FALSE)
+}
+
+isDDSym <- function(name) {
+    (is.symbol(name) || is.character(name)) &&
+    length(grep("^\\.\\.[[:digit:]]+$", as.character(name))) != 0
+}
+@ %def
+
+\end{document}
