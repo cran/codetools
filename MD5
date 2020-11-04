@@ -1,10 +1,10 @@
-192e930c2563a65ba7d016ffd5b62cd4 *DESCRIPTION
+31caad2eab52e97bc092763b4906298e *DESCRIPTION
 d7d4587719d6cbb3083123501ec23dd3 *NAMESPACE
-d9f6d3f41b530097621f7cde3c00e362 *R/codetools.R
+d08cfce369a4d56c230fa891ca9c0d89 *R/codetools.R
 2af77179b93b37abb2717ba0dacd60a3 *man/checkUsage.Rd
 722f473fac8f4c14d9fc199953daab44 *man/codetools.Rd
 29fbed23cf38b444df2df0ce0389946b *man/findGlobals.Rd
 7915e973bb95db1197db9152d339f2c8 *man/showTree.Rd
 2c6db8eacbc2d78379a22e1b98cabe30 *noweb/Makefile
-3c0ce557118a0ffc68a19a0c5bb26389 *noweb/codetools.nw
-5d57f32cdf54a6d7aeb059f3fc1ee7e4 *tests/tests.R
+f294a2a3db245da2d8a2e86b8dd35540 *noweb/codetools.nw
+cdfc228020a284a0666eb0180b3b12e2 *tests/tests.R

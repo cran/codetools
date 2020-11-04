@@ -1,5 +1,5 @@
 Package: codetools
-Version: 0.2-17
+Version: 0.2-18
 Priority: recommended
 Author: Luke Tierney <luke-tierney@uiowa.edu>
 Description: Code analysis tools for R.
@@ -9,6 +9,6 @@ Maintainer: Luke Tierney <luke-tierney@uiowa.edu>
 URL: https://gitlab.com/luke-tierney/codetools
 License: GPL
 NeedsCompilation: no
-Packaged: 2020-10-14 19:47:17 UTC; luke
+Packaged: 2020-11-02 14:45:50 UTC; luke
 Repository: CRAN
-Date/Publication: 2020-10-17 06:55:18 UTC
+Date/Publication: 2020-11-04 17:12:32 UTC

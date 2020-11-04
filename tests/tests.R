@@ -107,3 +107,8 @@ checkUsage(function() {
     x <- 1
     bquote(.(x * 1) * y)
 }, report = stop)
+
+
+## more bquote tests
+checkUsage(function(x) bquote(.(x) + y), report = stop)
+tools::assertError(checkUsage(function() bquote(.(x)), report = stop))
