@@ -12,6 +12,8 @@ flattenAssignment(e)
 getAssignedVar(e) 
 isConstantValue(v, w) 
 makeCodeWalker(..., handler, call, leaf) 
+makeConstantFolder(..., leaf, handler, call, exit, isLocal, foldable,
+                   isConstant, signal)
 makeLocalsCollector(..., leaf, handler, isLocal, exit, collect) 
 makeUsageCollector(fun, ..., name, enterLocal, enterGlobal, enterInternal,
                    startCollectLocals, finishCollectLocals, warn,
@@ -58,6 +60,8 @@ walkCode(e, w = makeCodeWalker())
   \item{finishCollectLocals}{function.}
   \item{warn}{function.}
   \item{signal}{function.}
+  \item{isConstant}{function.}
+  \item{foldable}{function.}
 }
 \description{
   These functions provide some tools for analysing R code.  Mainly
