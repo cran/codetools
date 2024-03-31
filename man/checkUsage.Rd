@@ -33,8 +33,8 @@ checkUsagePackage(pack, ...)
   \item{suppressNoLocalFun}{suppress warnings about using local variables
                             as functions with no apparent local function
                             definition}
-  \item{skipWith}{logical; if true, do no examine code portion of
-                  \code{with} expressions.}
+  \item{skipWith}{logical; if true, do not examine code portion of
+                  \code{with} or \code{within} expressions.}
   \item{suppressUndefined}{suppress warnings about undefined global
                           functions and variables.}
 

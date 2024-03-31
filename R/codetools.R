@@ -147,7 +147,7 @@ foldFuns <- c("+", "-", "*", "/", "^", "(",
               "rep",
               ":",
               "cos", "sin", "tan", "acos", "asin", "atan", "atan2",
-              "is.R", "$", "[", "[[")
+              "$", "[", "[[")
 constNames <- c("pi", "T", "F", ".Platform", ".Machine")
 
 foldLeaf <- function(e, w) {
@@ -646,6 +646,13 @@ addCollectUsageHandler("assign", "base", function(e, w) {
 
 addCollectUsageHandler("with", "base", function(e, w) {
     w$enterGlobal("function", "with", e, w)
+    if (identical(w$skipWith, TRUE))
+        walkCode(e[[2]], w)
+    else collectUsageArgs(e, w)
+})
+
+addCollectUsageHandler("within", "base", function(e, w) {
+    w$enterGlobal("function", "within", e, w)
     if (identical(w$skipWith, TRUE))
         walkCode(e[[2]], w)
     else collectUsageArgs(e, w)

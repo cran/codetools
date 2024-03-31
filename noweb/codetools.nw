@@ -364,7 +364,7 @@ foldFuns <- c("+", "-", "*", "/", "^", "(",
               "rep",
               ":",
               "cos", "sin", "tan", "acos", "asin", "atan", "atan2",
-	      "is.R", "$", "[", "[[")
+	      "$", "[", "[[")
 @ %def isFoldable foldFuns
 
 Leaves that are variables may be replaced by the values of these
@@ -1493,6 +1493,13 @@ addCollectUsageHandler("with", "base", function(e, w) {
     else collectUsageArgs(e, w)
 })
 
+addCollectUsageHandler("within", "base", function(e, w) {
+    w$enterGlobal("function", "within", e, w)
+    if (identical(w$skipWith, TRUE))
+        walkCode(e[[2]], w)
+    else collectUsageArgs(e, w)
+})
+
 local({
     h <- function(e, w) {
         w$enterGlobal("function", as.character(e[[1]]), e, w)
@@ -1654,7 +1661,6 @@ addCollectUsageHandler("if", "base", function(e, w) {
 @ %def
 
 <<test code>>=
-assert(! "y" %in% findGlobals(function() if (is.R()) x else y))
 assert(identical(findGlobals(function() if (FALSE) x), "if"))
 @ %def
 
@@ -2827,5 +2833,40 @@ isDDSym <- function(name) {
     length(grep("^\\.\\.[[:digit:]]+$", as.character(name))) != 0
 }
 @ %def
+
+<<test code>>=
+## bquote test cases (from Dirk Schumacher)
+checkUsage(function() {
+    s <- as.symbol("y")
+    bquote(
+        `for`(.(s), 1, x)
+    )
+}, report = stop)
+
+checkUsage(function() {
+    x <- 1
+    bquote(.(x) * y)
+}, report = stop)
+
+checkUsage(function() {
+    x <- 1
+    bquote(.(x * 1) * y)
+}, report = stop)
+
+
+## more bquote tests
+checkUsage(function(x) bquote(.(x) + y), report = stop)
+tools::assertError(checkUsage(function() bquote(.(x)), report = stop))
+
+## ensure within is skipped under skipWith=TRUE
+col_edit <- function(x) {
+    x <- within(x, key <- val + 1)
+    x
+}
+# NB: suppressLocal=TRUE needed to ignore 'key' being "unused". TODO: Fix this.
+checkUsage(col_edit, skipWith = TRUE, suppressLocal = TRUE, report = stop)
+# now with suppressLocal=FALSE, fail
+tools::assertError(checkUsage(col_edit, skipWith = TRUE, report = stop))
+@
 
 \end{document}
